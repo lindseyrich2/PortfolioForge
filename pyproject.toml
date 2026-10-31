@@ -4,10 +4,23 @@ build-backend = "hatchling.build"
 
 [project]
 name = "portfolioforge"
-version = "0.1.0"
+dynamic = ["version"]
 description = "An agentic system that discovers, analyzes, documents, and publishes past software and ML projects to GitHub."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Lindsey Rich", email = "lindseyrich3811@gmail.com" }]
 dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.hatch.version]
+path = "src/portfolioforge/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/portfolioforge"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
