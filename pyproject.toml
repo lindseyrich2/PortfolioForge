@@ -1,0 +1,13 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "portfolioforge"
+version = "0.1.0"
+description = "An agentic system that discovers, analyzes, documents, and publishes past software and ML projects to GitHub."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Lindsey Rich", email = "lindseyrich3811@gmail.com" }]
+dependencies = []
