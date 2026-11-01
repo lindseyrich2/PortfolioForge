@@ -87,7 +87,76 @@ def sanitize_error_message(message: str, body: dict[str, Any]) -> str:
     return text if len(text) <= MAX_ERROR_MESSAGE_CHARS else text[:MAX_ERROR_MESSAGE_CHARS] + "…"
 
 
-def describe_api_error(exc: Exception, body: dict[str, Any]) -> ProviderRequestFailed:
+class SendTracker:
+    """Records, through HTTP event hooks, whether a request actually left the computer."""
+
+    def __init__(self) -> None:
+        self.request_started = False
+        self.response_received = False
+
+    def hooks(self) -> dict[str, list]:
+        def on_request(request: Any) -> None:
+            self.request_started = True
+
+        def on_response(response: Any) -> None:
+            self.response_received = True
+
+        return {"request": [on_request], "response": [on_response]}
+
+    def describe(self) -> str:
+        if self.response_received:
+            return "the request was sent and a response was received"
+        if self.request_started:
+            return "the request may have been sent (the connection started)"
+        return "nothing was sent to Anthropic"
+
+
+#: Phase names by the module the exception was raised in (innermost matching frame wins).
+_PHASES = (
+    ("anthropic.lib.credentials", "credential resolution"),
+    ("anthropic.lib.auth", "credential resolution"),
+    ("httpcore", "network transport"),
+    ("httpx2", "network transport"),
+    ("anthropic._response", "response parsing"),
+    ("anthropic._models", "response parsing"),
+    ("anthropic.types", "response parsing"),
+)
+_SAFE_MODULE_PREFIXES = ("anthropic", "httpx2", "httpcore", "portfolioforge", "pydantic", "json")
+
+
+def exception_origin(exc: BaseException) -> tuple[str, str | None]:
+    """(phase, location) from the traceback, using module and function names only.
+
+    Never reads frame locals or file contents, so no request data can leak.
+    """
+    # Follow the cause chain (the SDK wraps transport errors in its own exceptions); the
+    # innermost exception decides the phase and location.
+    chain, current = [], exc
+    while current is not None and len(chain) < 6:
+        chain.append(current)
+        current = current.__cause__ or (None if current.__suppress_context__ else current.__context__)
+    frames = []
+    for item in chain:
+        tb = item.__traceback__
+        while tb is not None:
+            frame = tb.tb_frame
+            frames.append((str(frame.f_globals.get("__name__", "")), frame.f_code.co_name, tb.tb_lineno))
+            tb = tb.tb_next
+    phase = "request preparation"
+    for module, _, _ in frames:
+        for prefix, name in _PHASES:
+            if module == prefix or module.startswith(prefix + "."):
+                phase = name
+    location = None
+    for module, function, line in reversed(frames):
+        if module.split(".")[0] in _SAFE_MODULE_PREFIXES:
+            location = f"{module}.{function}:{line}"
+            break
+    return phase, location
+
+
+def describe_api_error(exc: Exception, body: dict[str, Any],
+                       tracker: SendTracker | None = None) -> ProviderRequestFailed:
     """Turn an SDK exception into a sanitized, useful error."""
     status = getattr(exc, "status_code", None)
     request_id = getattr(exc, "request_id", None)
@@ -102,45 +171,128 @@ def describe_api_error(exc: Exception, body: dict[str, Any]) -> ProviderRequestF
     parts = [f"Anthropic request failed: {type(exc).__name__}"]
     if status:
         parts.append(f"(HTTP {status}{', ' + error_type if error_type else ''})")
+    else:
+        # Not an API response: say where it failed and whether anything was sent.
+        phase, location = exception_origin(exc)
+        parts.append(f"during {phase}" + (f" at {location}" if location else ""))
+        if tracker is not None:
+            parts.append(f"({tracker.describe()})")
+        message = message or (str(exc.args[0]) if exc.args and isinstance(exc.args[0], str) else None)
     text = " ".join(parts)
     if message:
-        text += f": {sanitize_error_message(message, body)}"
+        text += f": {sanitize_error_message(_strip_reprs(message), body)}"
     if isinstance(request_id, str) and re.fullmatch(r"req_[A-Za-z0-9]+", request_id):
         text += f" [request id {request_id}]"
+    if not status and exception_origin(exc)[0] == "credential resolution":
+        text += (" Hint: check this terminal's credentials (set ANTHROPIC_API_KEY, or run `ant auth status`). "
+                 "PortfolioForge never reads or stores them.")
     return ProviderRequestFailed(text, status=status, error_type=error_type,
                                  request_id=request_id if isinstance(request_id, str) else None)
+
+
+def _strip_reprs(message: str) -> str:
+    """Drop long quoted values from non-API exception messages (they may be data reprs)."""
+    return re.sub(r"(['\"`]).{41,}?\1", r"\1[value removed]\1", message)
+
+
+def _import_sdk() -> Any:
+    try:
+        import anthropic
+    except ImportError as exc:
+        from .disclosure import ProviderNotConfigured
+        raise ProviderNotConfigured(
+            "The Anthropic SDK is not installed. Install it with: pip install -e \".[ai]\""
+        ) from exc
+    return anthropic
+
+
+#: Placeholder credential for the offline preflight (mock transport). Not a real key; never sent.
+_PREFLIGHT_PLACEHOLDER = "offline-preflight-placeholder"
+
+_PREFLIGHT_RESPONSE = {
+    "id": "msg_preflight", "type": "message", "role": "assistant", "model": "preflight",
+    "content": [{"type": "thinking", "thinking": "", "signature": "preflight"}, {"type": "text", "text": "{}"}],
+    "stop_reason": "end_turn", "stop_sequence": None, "usage": {"input_tokens": 1, "output_tokens": 1},
+}
+
+
+def preflight(body: dict[str, Any]) -> None:
+    """Run the exact approved body through the installed SDK offline.
+
+    Uses an in-memory mock transport and a dummy key, so no network request is made and no
+    credentials are read. Fails (before anything is sent) if the SDK rejects the request, or
+    if the bytes it would send differ from the approved body in any way.
+    """
+    anthropic = _import_sdk()
+    import httpx2
+
+    captured: list[dict[str, Any]] = []
+
+    def handler(request: Any) -> Any:
+        captured.append(json.loads(request.content))
+        return httpx2.Response(200, json={**_PREFLIGHT_RESPONSE, "model": body.get("model", "preflight")})
+
+    client = anthropic.Anthropic(
+        api_key=_PREFLIGHT_PLACEHOLDER, max_retries=0,
+        http_client=anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(handler)),
+    )
+    try:
+        client.messages.create(**body)
+    except Exception as exc:
+        phase, location = exception_origin(exc)
+        detail = str(exc.args[0]) if exc.args and isinstance(exc.args[0], str) else ""
+        raise ProviderRequestFailed(
+            f"Anthropic request failed: {type(exc).__name__} in the offline SDK preflight during {phase}"
+            + (f" at {location}" if location else "") + " (nothing was sent to Anthropic)"
+            + (f": {sanitize_error_message(_strip_reprs(detail), body)}" if detail else "")
+        ) from None
+    if captured != [body]:
+        from .disclosure import DisclosureNotApproved
+        raise DisclosureNotApproved(
+            "The installed SDK would send a request that differs from the approved one; nothing was sent."
+        )
 
 
 class AnthropicProvider:
     name = "anthropic"
 
-    def __init__(self, model: str, client: Any | None = None) -> None:
+    def __init__(self, model: str, client: Any | None = None, *, transport: Any | None = None) -> None:
         self.model = model
         self._client = client
-        """Injected in tests. When None, a real SDK client is created on first send."""
+        """A fake client, injected in tests. When None, a real SDK client is created per send."""
+        self._transport = transport
+        """An httpx2 transport for the real SDK client (tests use a MockTransport; never set in normal use)."""
 
-    def _make_client(self) -> Any:
-        try:
-            import anthropic
-        except ImportError as exc:
-            from .disclosure import ProviderNotConfigured
-            raise ProviderNotConfigured(
-                "The Anthropic SDK is not installed. Install it with: pip install -e \".[ai]\""
-            ) from exc
+    def _make_client(self, tracker: "SendTracker") -> Any:
+        anthropic = _import_sdk()
         key = os.environ.get(API_KEY_ENV)
-        return anthropic.Anthropic(api_key=key) if key else anthropic.Anthropic()
+        http_client = anthropic.DefaultHttpxClient(event_hooks=tracker.hooks(), **self._transport_kwargs())
+        kwargs: dict[str, Any] = {"http_client": http_client}
+        if key:
+            kwargs["api_key"] = key
+        return anthropic.Anthropic(**kwargs)
+
+    def _transport_kwargs(self) -> dict[str, Any]:
+        return {"transport": self._transport} if self._transport is not None else {}
 
     def send(self, payload: bytes) -> ProviderResult:
         body = json.loads(payload)
         if body.get("model") != self.model:
             from .disclosure import DisclosureNotApproved
             raise DisclosureNotApproved("The payload names a different model than the approved one; nothing was sent.")
-        client = self._client or self._make_client()
         digest = hashlib.sha256(payload).hexdigest()
+        tracker = SendTracker()
+        if self._client is None:
+            # Offline check first: the installed SDK must accept the request and serialize exactly
+            # the approved body. Uses a mock transport and a dummy key; nothing leaves the computer.
+            preflight(body)
         try:
+            client = self._client or self._make_client(tracker)
             response = client.messages.create(**body)
+        except ProviderRequestFailed:
+            raise
         except Exception as exc:  # map SDK errors to a sanitized, useful message
-            raise describe_api_error(exc, body) from None
+            raise describe_api_error(exc, body, tracker) from None
         stop = getattr(response, "stop_reason", None)
         request_id = getattr(response, "_request_id", None)
         if stop == "refusal":
