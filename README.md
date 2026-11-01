@@ -11,7 +11,8 @@ Past projects, especially academic ones, tend to be scattered: course folders on
 | **Local file inventory** (targeted folders or the whole computer) | ✅ Implemented |
 | **Privacy safeguards and local data management** | ✅ Implemented |
 | **Candidate grouping** of files into courses, assignments and projects (metadata only, reviewed by you) | ✅ Implemented |
-| Project understanding and descriptive naming (AI, approval-gated; [design](docs/design/project-understanding-and-naming.md)) | 🗓️ Planned |
+| **Analysis preparation**: eligibility filter, file approval, local evidence extraction, redaction, disclosure manifest, dry-run provider | ✅ Implemented (no AI provider connected) |
+| AI project understanding with a real provider, and descriptive naming ([design](docs/design/project-understanding-and-naming.md)) | 🗓️ Planned |
 | AI analysis of code, notebooks and documents | 🗓️ Planned |
 | Google Drive and Google Colab sources | 🗓️ Planned |
 | Documentation generation | 🗓️ Planned |
@@ -273,6 +274,61 @@ relationship = 3.0
 - **The rules have been tested only on synthetic examples.** Expect to tune the settings, or correct groups, on real inventories.
 - **`data purge` doesn't yet cover grouping results.** It manages saved inventories only; grouping results and decisions live in `<data dir>/groupings` and `<data dir>/reviews`.
 
+## Preparing projects for analysis
+
+This stage prepares accepted groups for a future AI analysis, without connecting to any AI provider. It follows the [approved design](docs/design/project-understanding-and-naming.md) and has two approval gates.
+
+```powershell
+python -m portfolioforge.understanding eligibility             # which groups look like technical projects
+python -m portfolioforge.understanding select <GROUP>          # files that could be read, and what is excluded
+python -m portfolioforge.understanding approve-files <GROUP>   # GATE 1: allow reading them on this computer
+python -m portfolioforge.understanding extract <GROUP>         # build a redacted, referenced evidence pack
+python -m portfolioforge.understanding manifest <GROUP> --provider dry-run   # exactly what would be sent
+python -m portfolioforge.understanding approve-manifest <GROUP> <MANIFEST>   # GATE 2: approve that exact payload
+python -m portfolioforge.understanding dry-run <GROUP> <MANIFEST>            # test the send path; sends nothing
+```
+
+1. **Eligibility uses metadata only and reads no files.** Each group gets one of four statuses:
+   - **`technical_candidate`**: code or notebooks, good grouping confidence, no review flags
+   - **`needs_review`**: uncertain, for example a single script beside a report, documents only, loose files, low confidence, or flags for duplicates, third-party code, templates or generic names. Approving one requires `--acknowledge-review`. Little code alone never makes a group personal.
+   - **`personal_or_admin`**: no code or notebooks, *and* names typical of personal paperwork (resume, transcript, tax, receipt, bank, …). These can't be approved.
+   - **`excluded`**: groups you labelled ignored or third-party, and course collections
+
+   Nothing is ever approved or selected automatically, and no group is marked as yours or publishable.
+2. **Gate 1, file approval.**
+   - Only groups you've **accepted** in the grouping stage can be approved.
+   - Proposed files are Python, Java, R, R Markdown, SQL and notebooks, plus README and `requirements.txt`. Data files, documents, archives and images are excluded.
+   - Credential-looking files, private folders and credential locations can never be approved.
+   - The approval records each file's size and modification time. If a file changes afterwards, it can't be read until you approve it again.
+3. **Local evidence extraction.**
+   - Only approved files are opened, through a single guarded reader that refuses links and cloud-only placeholders. Nothing is executed: Python is parsed with the standard `ast` module, and other languages are scanned line by line.
+   - Notebook outputs are excluded.
+   - Each excerpt keeps its file, its line or cell, and a SHA-256 hash, so future AI claims can be checked against it.
+   - Technologies are detected locally, only from imports and declared dependencies.
+4. **Redaction.** Email addresses, absolute paths, secret-looking values, author and student-name lines, phone numbers and long literal strings are removed from excerpts before they are stored.
+5. **Gate 2, the disclosure manifest.** It shows:
+   - the provider and model
+   - every excerpt, with its location, size and redactions
+   - what is *not* sent: absolute paths, folder names above the project, the working title, timestamps, notebook outputs, data and documents
+   - the payload size, an estimate of tokens, and the payload's SHA-256
+
+   The exact payload is saved locally for you to inspect. Your approval covers that exact payload, provider and model; if anything changes, nothing is sent.
+6. **The provider.**
+   - Only the **dry-run** provider exists, and it sends nothing. There is no default provider and no network code.
+   - Every attempt, including refusals, is recorded in a local audit log, without any content.
+
+Approvals, evidence packs, manifests, payloads and the audit log are stored in `<data dir>/understanding/<inventory id>/<group id>/`, never in a Git repository. Evidence and payloads contain excerpts of your code, so keep them private. Use `--redact` for output that is safe to share.
+
+**Limitations:**
+- **The eligibility filter is a conservative heuristic.**
+  - Coursework that is mostly documents lands in `needs_review`, which you can approve manually.
+  - A project whose file names happen to look like personal paperwork, with no code, is treated as `personal_or_admin`.
+- **Extraction for Java, R and SQL is pattern-based.** It can miss unusual syntax.
+- **Python files that don't parse fall back to imports and definition lines only.**
+- **Redaction is pattern-based** and can miss unusual personal details, so review the manifest and payload before approving.
+- **Data schema extraction and document reading aren't implemented yet.**
+- **Real AI providers, claim verification and naming are the next stages.**
+
 ## Privacy and your data
 
 PortfolioForge works with the names and locations of your personal files, so it is built to keep that information on your computer.
@@ -394,6 +450,11 @@ PortfolioForge/
 │   ├── privacy.py                  # private-folder settings (privacy.toml)
 │   ├── data.py                     # python -m portfolioforge.data (list/stats/purge/where)
 │   ├── devtools/privacy_check.py   # repository privacy check
+│   ├── understanding/              # analysis preparation (python -m portfolioforge.understanding)
+│   │   ├── eligibility.py, selection.py   # metadata-only eligibility; Gate 1 file approval
+│   │   ├── reader.py, extract.py, redact.py   # guarded reader; evidence extraction; redaction
+│   │   ├── disclosure.py           # manifest, Gate 2 approval, send gate, dry-run provider
+│   │   └── store.py, models.py, cli.py
 │   ├── grouping/                   # metadata-only candidate grouping (python -m portfolioforge.grouping)
 │   │   ├── features.py, index.py   # name features; folder tree from the saved inventory
 │   │   ├── segment.py, clustering.py   # course → assignment/project hierarchy; loose-file splitting

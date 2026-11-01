@@ -1,6 +1,19 @@
 # Design: Project Understanding and Naming (future stage)
 
-Status: **approved design, not implemented.** Nothing in PortfolioForge currently sends file contents to an AI provider.
+Status: **approved design, partly implemented.**
+- **Implemented** (`portfolioforge.understanding`):
+  - the eligibility filter
+  - Gate 1 file approval
+  - local evidence extraction and redaction
+  - the disclosure manifest with Gate 2 approval
+  - the send gate and a dry-run provider
+- **Not implemented:**
+  - real AI providers
+  - AI understanding and claim verification
+  - naming, collisions and provenance
+  - publishing
+
+Nothing in PortfolioForge sends file contents to an AI provider.
 
 ## Goal
 
