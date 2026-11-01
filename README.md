@@ -10,7 +10,8 @@ Past projects, especially academic ones, tend to be scattered: course folders on
 |---|---|
 | **Local file inventory** (targeted folders or the whole computer) | ✅ Implemented |
 | **Privacy safeguards and local data management** | ✅ Implemented |
-| Grouping files into projects (including across folders) | 🗓️ Planned |
+| **Candidate grouping** of files into courses, assignments and projects (metadata only, reviewed by you) | ✅ Implemented |
+| Project understanding and descriptive naming (AI, approval-gated; [design](docs/design/project-understanding-and-naming.md)) | 🗓️ Planned |
 | AI analysis of code, notebooks and documents | 🗓️ Planned |
 | Google Drive and Google Colab sources | 🗓️ Planned |
 | Documentation generation | 🗓️ Planned |
@@ -185,6 +186,93 @@ saved = load_inventory(inventories_dir() / "20261101T120000Z")
 
 Full-computer scans from Python also require explicit approval: `run_scan(plan_full_computer(), sink=..., allow_full_computer=True)`.
 
+## Candidate grouping
+
+The grouping stage reads a **saved inventory** (format v1 or v2) and proposes which files belong together. It uses only the metadata already recorded: names, folders, extensions, sizes, timestamps and project markers.
+
+It never opens your files, never rescans folders, never calls an AI model or any other service, and stores its results only in your data folder.
+
+### What it proposes
+
+- **A hierarchy:** course or term collections (for example `Fall 2021` → `CS 101 Intro`) containing assignments and projects.
+  - Course and term folders are recognized from course codes, term names and words such as "course" or "class".
+- **Assignments within one folder.** Loose files are split by:
+  - assignment numbers: `hw1.py` and `hw1_writeup.pdf` together, `hw2.py` separately; different numbers are never joined
+  - shared base names and shared name words
+  - modification times that are close together
+- **Project folders.** These are recognized by markers such as `.git`, a README, dependency files, IDE settings or a virtual environment.
+  - Standard subfolders like `src` and `data` stay part of their project.
+  - A clearly separate project nested inside another becomes a child group.
+- **Suggested relationships across folders.** For example, a report in `Documents` and code in `PycharmProjects` that share uncommon name words and were active at the same time. These are **suggestions only**: groups are never merged unless you merge them.
+- **Review flags, not decisions:**
+  - possible duplicate copies (`- Copy`, `(2)`, matching paths and sizes); every copy is kept
+  - possible third-party code: its own `.git` plus LICENSE/CONTRIBUTING files, timestamps that look bulk-copied, or a name on your own list. Ownership is never decided for you.
+  - possible templates or starter code
+  - generic names (`Untitled`, `main`)
+  - large datasets
+  - folders mixing several assignments
+  - weak evidence
+
+**Every file appears exactly once,** either in a group or in an "unassigned" list with the reason. Unassigned files come with the nearest likely groups.
+
+**Every group, membership and relationship lists its evidence** with a confidence score (high, medium or low). Scores rank proposals; they are not probabilities.
+
+**Generic names and copied timestamps carry little weight.** Files named `Untitled` or `main` don't contribute name evidence, and timestamps that look bulk-copied are ignored.
+
+**Working titles come from folder and file names and are provisional.** Final repository names will come from the later, approval-gated naming stage.
+
+### Reviewing and correcting
+
+```powershell
+python -m portfolioforge.grouping propose          # group the latest inventory
+python -m portfolioforge.grouping list --flagged   # the hierarchy, with flags
+python -m portfolioforge.grouping show <GROUP>     # evidence, files, flags, relationships
+python -m portfolioforge.grouping merge <GROUP> <GROUP>
+python -m portfolioforge.grouping split <GROUP> <FILE>... --title "Lab report"
+python -m portfolioforge.grouping move <FILE> <GROUP>      # or: unassign <FILE>
+python -m portfolioforge.grouping accept|reject|rename <GROUP> ...
+python -m portfolioforge.grouping label <GROUP> mine|third_party|ignored
+python -m portfolioforge.grouping keep-both|mark-duplicate <GROUP> <GROUP>
+python -m portfolioforge.grouping confirm|dismiss <RELATIONSHIP>
+python -m portfolioforge.grouping report           # writes a local Markdown report
+```
+
+- **Your decisions are kept** in a local ledger (`<data dir>/reviews/<inventory id>/decisions.jsonl`). They are re-applied every time proposals are regenerated, because group ids are stable.
+- **Out-of-date decisions are reported,** never silently dropped: for example, one that refers to a file no longer in the inventory.
+- **`--redact`** shows ids, kinds, counts and scores only.
+- **`--inventory <ID>`** chooses an inventory other than the latest.
+
+### Grouping settings
+
+All rules use general defaults. To extend them for your own folders or language, add a `grouping.toml` in your settings folder:
+
+```toml
+[vocabulary]
+assignment_words = ["aufgabe"]          # added to hw, lab, assignment, project, tarea, ...
+collection_words = ["kurs"]
+container_names = ["Semester Work"]     # folders that collect unrelated work
+known_third_party_names = ["some-library"]
+
+[patterns]
+course_code = '(?i)\b([A-Z]{2,5})[ _-]?(\d{3,4}[A-Z]?)\b'
+
+[weights]
+same_assignment_number = 3.0
+
+[thresholds]
+relationship = 3.0
+```
+
+### Limitations
+
+- **Metadata only.** Grouping can't see imports, notebook contents or report text, so files with generic names stay ambiguous until you review them.
+- **Timestamps are imperfect.** Copying, unzipping and cloud sync change modification times, so time is supporting evidence only.
+- **Course-code matches are hints and can be wrong,** such as product names with numbers. You can tune the pattern and excluded words.
+- **Duplicate detection compares names, paths and sizes, not contents.** Copies with renamed files or different sizes can be missed. Content hashing is a deferred, opt-in feature.
+- **Third-party detection relies on folder signals,** so it can miss vendored code and can flag your own published repositories. It only asks you to review.
+- **The rules have been tested only on synthetic examples.** Expect to tune the settings, or correct groups, on real inventories.
+- **`data purge` doesn't yet cover grouping results.** It manages saved inventories only; grouping results and decisions live in `<data dir>/groupings` and `<data dir>/reviews`.
+
 ## Privacy and your data
 
 PortfolioForge works with the names and locations of your personal files, so it is built to keep that information on your computer.
@@ -306,6 +394,12 @@ PortfolioForge/
 │   ├── privacy.py                  # private-folder settings (privacy.toml)
 │   ├── data.py                     # python -m portfolioforge.data (list/stats/purge/where)
 │   ├── devtools/privacy_check.py   # repository privacy check
+│   ├── grouping/                   # metadata-only candidate grouping (python -m portfolioforge.grouping)
+│   │   ├── features.py, index.py   # name features; folder tree from the saved inventory
+│   │   ├── segment.py, clustering.py   # course → assignment/project hierarchy; loose-file splitting
+│   │   ├── linking.py, duplicates.py, flags.py   # suggested relationships, duplicates, review flags
+│   │   ├── review.py, store.py     # persistent decisions; local storage outside Git
+│   │   └── engine.py, report.py, cli.py, config.py, models.py
 │   └── inventory/
 │       ├── formats.py              # extension → category/language registry
 │       ├── rules.py                # exclusion and sensitive-file rules
@@ -317,5 +411,6 @@ PortfolioForge/
 │       ├── models.py               # structured output (dataclasses)
 │       ├── sinks.py                # in-memory and JSONL output
 │       └── cli.py                  # python -m portfolioforge.inventory
+├── docs/design/                    # approved designs for future stages
 └── tests/
 ```

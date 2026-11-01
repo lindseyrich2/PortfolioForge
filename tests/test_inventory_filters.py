@@ -112,24 +112,24 @@ def test_r_coursework_is_inventoried(scan, tmp_path):
     root = make_tree(
         tmp_path / "Statistics Course",
         {
-            "House_Price/project/src/models/model.R": "",
-            "House_Price/project/src/features/features.R": "",
-            "House_Price/project/required/libs.R": "library(data.table)",
-            "House_Price/project/volume/data/raw/train.csv": "a,b",
-            "Midterm/analysis.Rmd": "",
-            "Midterm - Copy/analysis.Rmd": "",
+            "Regression Study/code/models/model.R": "",
+            "Regression Study/code/features.R": "",
+            "Regression Study/setup/libs.R": "library(data.table)",
+            "Regression Study/data/raw/train.csv": "a,b",
+            "Exam Review/analysis.Rmd": "",
+            "Exam Review - Copy/analysis.Rmd": "",
             "R/hw1.R": "",  # folder named R
             "library/notes.txt": "",  # folder named library, not under renv
             "lib/helper.R": "",  # folder named lib, not under packrat
         },
     )
     assert file_paths(scan(root)) == {
-        "House_Price/project/src/models/model.R",
-        "House_Price/project/src/features/features.R",
-        "House_Price/project/required/libs.R",
-        "House_Price/project/volume/data/raw/train.csv",
-        "Midterm/analysis.Rmd",
-        "Midterm - Copy/analysis.Rmd",
+        "Regression Study/code/models/model.R",
+        "Regression Study/code/features.R",
+        "Regression Study/setup/libs.R",
+        "Regression Study/data/raw/train.csv",
+        "Exam Review/analysis.Rmd",
+        "Exam Review - Copy/analysis.Rmd",
         "R/hw1.R",
         "library/notes.txt",
         "lib/helper.R",
