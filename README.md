@@ -13,7 +13,8 @@ Past projects, especially academic ones, tend to be scattered: course folders on
 | **Candidate grouping** of files into courses, assignments and projects (metadata only, reviewed by you) | ✅ Implemented |
 | **Analysis preparation**: eligibility filter, file approval, local evidence extraction, redaction, disclosure manifest, dry-run provider | ✅ Implemented |
 | **AI project understanding and naming** (Anthropic, approval-gated, locally verified; [design](docs/design/project-understanding-and-naming.md)) | ✅ Implemented, opt-in; never runs without your approvals |
-| Local validation of run/test instructions (separately approved, sandboxed) | 🗓️ Planned |
+| **Local build-and-run inspection** (separately approved; Java is the only project type with an inspector) | ✅ Implemented |
+| **Optional local validation** (compile or run on a temporary copy, each approved separately; not a sandbox) | ✅ Implemented, opt-in; runs nothing without your typed approval |
 | AI analysis of code, notebooks and documents | 🗓️ Planned |
 | Google Drive and Google Colab sources | 🗓️ Planned |
 | Documentation generation | 🗓️ Planned |
@@ -329,6 +330,49 @@ Approvals, evidence packs, manifests, payloads and the audit log are stored in `
 - **Redaction is pattern-based** and can miss unusual personal details, so review the manifest and payload before approving.
 - **Data schema extraction and document reading aren't implemented yet.**
 
+## Local build-and-run inspection
+
+When code excerpts aren't enough to say how a project builds and runs, this stage reads a few more approved files on your computer. It runs nothing and sends nothing.
+
+```powershell
+python -m portfolioforge.understanding select-build-files <GROUP>    # checks a fixed list of names; opens nothing
+python -m portfolioforge.understanding approve-build-files <GROUP>   # separate approval to read those files
+python -m portfolioforge.understanding inspect <GROUP>               # entry points, packages, versions, commands, sensitive data
+python -m portfolioforge.understanding show-inspection <GROUP>
+python -m portfolioforge.understanding apply-inspection <GROUP> <PROPOSAL>   # improve the draft README; nothing is sent
+```
+
+**Inspectors.** A small inspector for each project type supplies its build-file names, how to read them, its commands, allowed tools and any extra sensitive-data rules. The approvals, validation gates and README workflow are the same for every type. Java (NetBeans, Ant, Maven, Gradle and plain `javac`) is the only inspector so far.
+
+**No inspector means "manual review needed".** No commands or validation plans are offered, and nothing about the project is assumed. Approved files still get the privacy scan, and a proposal gets a review flag.
+
+**Supported or guess.** Every command is labelled:
+- **Supported:** an inspected file backs it. For example, `ant run` needs `nbproject/build-impl.xml`, where NetBeans defines that target, as well as a main class in `nbproject/project.properties`.
+- **Guess:** the inspected files don't confirm it, however plausible it looks.
+
+Neither label means the command was run.
+
+**Sensitive data.** The scan looks for likely credentials, identifiers and personal sample data, and reports the file, line and kind, never the value. It covers only the files that were read, and it lists what it didn't read, so a clean result says nothing about those. Findings become review flags, so accepting a proposal needs `--acknowledge-flags`. They never appear in the README. `nbproject/private` and files such as `config.properties` are never read.
+
+**A new disclosure.** `manifest <GROUP> --provider ... --with-inspection` adds confirmed findings to a new payload. Its hash changes, so earlier approvals don't cover it. Guesses, scan results, risk signals and validation output are left out.
+
+### Optional local validation
+
+```powershell
+python -m portfolioforge.understanding plan-validation <GROUP> --action compile   # or: --action run [--entry NAME]
+python -m portfolioforge.understanding approve-validation <GROUP> <PLAN>          # no --yes: you always type it
+python -m portfolioforge.understanding validate <GROUP> <PLAN>
+```
+
+- **Each plan shows its exact commands.** An approval covers that plan once. Approving `compile` doesn't authorize `run`, and `run` needs you to type `run my code`.
+- **Nothing runs if anything changed.** The plan's hash, its commands and each source file's hash are checked again first.
+- **It works on a temporary copy of the approved sources,** deleted afterwards, with a reduced environment, no shell, no input, a time limit and capped, redacted output.
+- **For Java,** only `javac` and `java` run, never Ant, Maven or Gradle, whose build files are programs themselves. `javac` runs with annotation processing off, so compiling doesn't run project code.
+
+> **This is not a sandbox.** A `run` uses your account's permissions, so the program could read or change your files or use the network if its code does so. Only approve code you're willing to run.
+
+Exit code 0 is recorded as exactly that, not as proof the program works.
+
 ## AI project understanding and naming (optional)
 
 The optional `ai` extra adds one AI provider, Anthropic. It sends nothing unless you approve a manifest *for Anthropic*, for the exact payload and model, and then type `send`.
@@ -519,6 +563,10 @@ PortfolioForge/
 │   │   ├── disclosure.py           # manifest, Gate 2 approval, send gate, dry-run provider
 │   │   ├── anthropic_provider.py   # Anthropic adapter: sends exactly the approved request body
 │   │   ├── analysis.py             # output schema, local claim/instruction verification, proposals
+│   │   ├── build_files.py, inspection.py, sensitive.py   # build-file approval; local inspection; privacy scan
+│   │   ├── inspectors/             # inspector interface, registry, and the Java inspector
+│   │   ├── validation.py           # the only code that runs a project; approval-gated
+│   │   ├── findings.py             # local findings into proposals and new manifests
 │   │   └── store.py, models.py, cli.py
 │   ├── grouping/                   # metadata-only candidate grouping (python -m portfolioforge.grouping)
 │   │   ├── features.py, index.py   # name features; folder tree from the saved inventory

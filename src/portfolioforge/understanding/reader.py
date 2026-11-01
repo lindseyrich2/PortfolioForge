@@ -36,6 +36,9 @@ class ApprovedFileReader:
         """File ids actually opened, for auditing and tests."""
 
     def read_text(self, file_id: str) -> str:
+        return self.read_bytes(file_id).decode("utf-8", errors="replace")
+
+    def read_bytes(self, file_id: str) -> bytes:
         approved = self._approved.get(file_id)
         if approved is None:
             raise ReadRefused("This file is not in the approval record.")
@@ -45,7 +48,7 @@ class ApprovedFileReader:
         self.opened.append(file_id)
         if len(data) > self._max_bytes:
             raise ReadRefused("File is larger than the reading limit.")
-        return data.decode("utf-8", errors="replace")
+        return data
 
     def _check(self, approved: ApprovedFile) -> None:
         name = os.path.basename(approved.absolute_path)

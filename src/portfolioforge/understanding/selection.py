@@ -113,6 +113,16 @@ def _unsupported_reason(record: FileRecord) -> str:
     return f"no evidence extractor for {record.extension or 'this file type'}"
 
 
+def require_approvable(group: CandidateGroup, eligibility: Eligibility, acknowledge_review: bool) -> None:
+    """The conditions every approval to read files locally shares."""
+    if group.status is not GroupStatus.ACCEPTED:
+        raise ApprovalError("Accept the group first (python -m portfolioforge.grouping accept <GROUP>).")
+    if eligibility.status in (EligibilityStatus.PERSONAL_OR_ADMIN, EligibilityStatus.EXCLUDED):
+        raise ApprovalError(f"This group is {eligibility.status.value} and cannot be approved for analysis.")
+    if eligibility.status is EligibilityStatus.NEEDS_REVIEW and not acknowledge_review:
+        raise ApprovalError("This group needs review. Check its reasons, then approve with the review acknowledgement.")
+
+
 def approve_files(
     *,
     inventory_key: str,
@@ -129,12 +139,7 @@ def approve_files(
     Raises ApprovalError unless the group is accepted, eligible, and every
     requested file is in the proposal's selected list.
     """
-    if group.status is not GroupStatus.ACCEPTED:
-        raise ApprovalError("Accept the group first (python -m portfolioforge.grouping accept <GROUP>).")
-    if eligibility.status in (EligibilityStatus.PERSONAL_OR_ADMIN, EligibilityStatus.EXCLUDED):
-        raise ApprovalError(f"This group is {eligibility.status.value} and cannot be approved for analysis.")
-    if eligibility.status is EligibilityStatus.NEEDS_REVIEW and not acknowledge_review:
-        raise ApprovalError("This group needs review. Check its reasons, then approve with the review acknowledgement.")
+    require_approvable(group, eligibility, acknowledge_review)
     selectable = {s.file_id: s for s in proposal.selected}
     chosen = list(dict.fromkeys(file_ids)) if file_ids else list(selectable)
     if not chosen:

@@ -5,7 +5,17 @@
     approve-files GROUP [--file ID ...] [--acknowledge-review] [--yes]
                                             Gate 1: allow these files to be read on this computer
     extract GROUP                           read approved files locally; build a redacted evidence pack
-    manifest GROUP --provider {dry-run,anthropic} [--model M]
+    select-build-files GROUP                build configuration files that could be read (opens nothing)
+    approve-build-files GROUP [--file ID ...] [--acknowledge-review] [--yes]
+                                            separate approval to read those files on this computer
+    inspect GROUP                           work out how to build and run; flag sensitive data (runs nothing)
+    show-inspection GROUP                   the latest findings; flagged values are never shown
+    plan-validation GROUP --action {compile,run} [--entry NAME] [--timeout S]
+                                            show the exact commands a local validation would run
+    approve-validation GROUP PLAN           approve that exact plan for one execution (always asks you to type)
+    validate GROUP PLAN                     run an approved plan on a temporary copy
+    apply-inspection GROUP PROPOSAL         add local findings to a proposal and its README (nothing is sent)
+    manifest GROUP --provider {dry-run,anthropic} [--model M] [--with-inspection]
                                             show exactly what would be sent, to whom, and how much
     approve-manifest GROUP MANIFEST [--yes] Gate 2: approve that exact payload for that provider and model
     dry-run GROUP MANIFEST                  run a dry-run manifest through the send path (sends nothing)
@@ -24,8 +34,11 @@ import argparse
 import json
 import sys
 from collections import Counter
+from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Callable, Sequence
 
+from ..devtools.privacy_check import local_identity_terms
 from ..grouping.cli import UsageError, resolve_inventory
 from ..grouping.models import GroupingRun
 from ..grouping.store import load_run
@@ -43,6 +56,7 @@ from .analysis import (
     edit_proposal,
 )
 from .anthropic_provider import ProviderRequestFailed
+from .build_files import MAX_BUILD_FILE_BYTES, approve_build_files, propose_build_files
 from .disclosure import (
     PROVIDERS,
     DisclosureNotApproved,
@@ -55,26 +69,51 @@ from .disclosure import (
 )
 from .eligibility import assess_run
 from .extract import build_evidence_pack, evidence_summary
-from .models import EligibilityStatus
+from .findings import NOT_SENT_WITH_FINDINGS, apply_inspection, build_augmented_pack
+from .inspection import inspect_project
+from .models import BuildInspection, EligibilityStatus, ValidationResult
 from .reader import ApprovedFileReader
 from .selection import ApprovalError, approve_files, propose_selection
 from .store import (
     accepted_names,
     append_audit,
     find_manifest_approval,
+    find_validation_approval,
+    latest_augmented_pack,
+    latest_build_approval,
     latest_file_approval,
+    latest_inspection,
     latest_manifest,
     latest_pack,
     list_proposals,
+    list_validation_results,
     load_manifest,
     load_proposal,
+    load_validation_plan,
+    save_augmented_pack,
+    save_build_approval,
     save_file_approval,
+    save_inspection,
     save_manifest,
     save_manifest_approval,
     save_pack,
     save_proposal,
     save_readme,
     save_response,
+    save_validation_approval,
+    save_validation_plan,
+    save_validation_result,
+)
+from .validation import (
+    ACTIONS,
+    ValidationRefused,
+    ValidationUnavailable,
+    approve_plan,
+    build_plan,
+    describe_outcome,
+    execute_plan,
+    format_plan,
+    run_bounded,
 )
 
 EXIT_OK = 0
@@ -107,6 +146,32 @@ def build_parser() -> argparse.ArgumentParser:
     manifest.add_argument("--model", help=f"default: dry-run, or {DEFAULT_ANTHROPIC_MODEL} for anthropic")
     manifest.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
     manifest.add_argument("--effort", choices=("low", "medium", "high", "xhigh", "max"), default=DEFAULT_EFFORT)
+    manifest.add_argument("--with-inspection", action="store_true",
+                          help="add confirmed local findings; this makes a new payload needing a new approval")
+    sub.add_parser("select-build-files", help="build configuration files that could be read").add_argument("group")
+    approve_build = sub.add_parser("approve-build-files", help="separate approval to read build configuration files")
+    approve_build.add_argument("group")
+    approve_build.add_argument("--file", action="append", dest="files", metavar="FILE_ID",
+                               help="approve only these files (default: all recognized build files)")
+    approve_build.add_argument("--acknowledge-review", action="store_true")
+    approve_build.add_argument("--yes", action="store_true")
+    sub.add_parser("inspect", help="work out how to build and run; runs nothing").add_argument("group")
+    sub.add_parser("show-inspection", help="the latest inspection findings").add_argument("group")
+    plan = sub.add_parser("plan-validation", help="show the exact commands a validation would run; runs nothing")
+    plan.add_argument("group")
+    plan.add_argument("--action", required=True, choices=ACTIONS)
+    plan.add_argument("--entry", metavar="NAME", help="entry point to run, when there is more than one")
+    plan.add_argument("--timeout", type=int, metavar="SECONDS")
+    # Deliberately no --yes: permission to run a project's code is always typed by a person.
+    approve_v = sub.add_parser("approve-validation", help="approve one plan for one execution")
+    approve_v.add_argument("group")
+    approve_v.add_argument("plan")
+    validate = sub.add_parser("validate", help="run an approved plan on a temporary copy")
+    validate.add_argument("group")
+    validate.add_argument("plan")
+    apply_i = sub.add_parser("apply-inspection", help="add local findings to a proposal; nothing is sent")
+    apply_i.add_argument("group")
+    apply_i.add_argument("proposal")
     send = sub.add_parser("submit", help="send an approved manifest to its (external) provider")
     send.add_argument("group")
     send.add_argument("manifest")
@@ -147,7 +212,8 @@ def main(argv: Sequence[str] | None = None, *, input_fn: Callable[[str], str] = 
     args = parser.parse_args(argv)
     try:
         return _run(args, input_fn)
-    except (UsageError, ApprovalError, DisclosureNotApproved, ProviderNotConfigured, ProposalError) as exc:
+    except (UsageError, ApprovalError, DisclosureNotApproved, ProviderNotConfigured, ProposalError,
+            ValidationRefused, ValidationUnavailable) as exc:
         print(f"error: {exc}", file=sys.stderr)  # these messages never contain paths
         return EXIT_ERROR
     except (ValueError, OSError, PrivacyConfigError) as exc:
@@ -185,6 +251,8 @@ def _confirm(prompt: str, word: str, args: argparse.Namespace, input_fn: Callabl
 
 #: Replaced in tests with a fake provider factory. Never contacts anything by itself.
 make_provider = get_provider
+#: Replaced in tests with a fake runner. Only reached through an approved validation plan.
+make_runner = run_bounded
 
 
 def _submit(args: argparse.Namespace, key: str, group, input_fn: Callable[[str], str]) -> int:
@@ -242,6 +310,132 @@ def _submit(args: argparse.Namespace, key: str, group, input_fn: Callable[[str],
     return EXIT_OK
 
 
+def _format_inspection(i: BuildInspection, *, redact: bool) -> str:
+    read = sum(f["status"] == "read" for f in i.files)
+    supported = sum(c.status == "supported" for c in i.commands)
+    guesses = len(i.commands) - supported
+    high = sum(s.confidence == "high" for s in i.sensitive)
+    lines = [f"Build inspection {i.id}",
+             f"  Inspector: {i.inspector or 'none'}"]
+    if i.manual_review_reason:
+        lines.append(f"  MANUAL REVIEW NEEDED: {i.manual_review_reason}")
+    lines += [
+             f"  Files read: {read} of {len(i.files)} approved; {len(i.not_inspected)} project file(s) not read",
+             f"  Build systems: {', '.join(i.build_systems) or 'none found'}",
+             f"  Entry points: {len(i.entry_points)}; packages: {len(i.packages)}",
+             f"  Version requirement stated: {'yes' if i.requirements else 'no'}",
+             f"  Commands: {supported} supported by inspected files, {guesses} guesses (none have been run)",
+             f"  Possible sensitive data: {len(i.sensitive)} finding(s), {high} likely (values are never shown)",
+             f"  Risk signals: {len(i.risks)}"]
+    if redact:
+        return "\n".join(lines)
+    not_read = [f for f in i.files if f["status"] != "read"]
+    if not_read:
+        lines.append("  Approved but not read:")
+        lines += [f"    {f['project_path']}: {f['status']}" for f in not_read]
+    if i.source_roots or i.test_roots:
+        lines.append(f"  Source folders: {', '.join(i.source_roots) or 'none'}; "
+                     f"test folders: {', '.join(i.test_roots) or 'none'}")
+    if i.requirements:
+        lines.append("  Version requirements:")
+        lines += [f"    {r.setting}={r.value}  ({r.source.location})" for r in i.requirements]
+    if i.packages:
+        lines.append("  Packages:")
+        lines += [f"    {p.name or '(default package)'}: {p.files} file(s)"
+                  + ("" if p.location_matches else "  ⚠ not in the folder the package requires") for p in i.packages]
+    if i.entry_points:
+        lines.append("  Entry points:")
+        for e in i.entry_points:
+            where = e.source.location if e.source else "not seen in an inspected source"
+            declared = f"; declared in {', '.join(r.location for r in e.declared_by)}" if e.declared_by else ""
+            lines.append(f"    {e.name}  [{e.status}]  {where}{declared}" + (f"  ({e.note})" if e.note else ""))
+    if i.dependencies:
+        lines.append("  Declared dependencies: " + ", ".join(dict.fromkeys(d.detail for d in i.dependencies)))
+    if i.commands:
+        lines.append("  Commands (✓ supported by inspected files, ⚠ guess; none have been run):")
+        for c in i.commands:
+            mark = "✓" if c.status == "supported" else "⚠"
+            folder = f" (in {c.working_dir})" if c.working_dir else ""
+            lines.append(f"    {mark} [{c.purpose}] {c.command}{folder}  — {c.reason}")
+    if i.sensitive:
+        lines.append("  Review before publishing (values are not shown):")
+        order = {"high": 0, "medium": 1, "low": 2}
+        for s in sorted(i.sensitive, key=lambda s: (order.get(s.confidence, 3), s.project_path, s.line or 0)):
+            where = f"{s.project_path}:{s.line}" if s.line else s.project_path
+            lines.append(f"    [{s.confidence}] {where}  {s.kind}: {s.detail}")
+    if i.risks:
+        lines.append("  What this code does when run:")
+        lines += [f"    {r.project_path}" + (f":{r.line}" if r.line else "") + f"  {r.detail}" for r in i.risks]
+    if i.not_inspected:
+        lines.append("  Not read, so not scanned:")
+        lines += [f"    {path}" for path in i.not_inspected]
+    if i.notes:
+        lines.append("  Notes:")
+        lines += [f"    - {note}" for note in i.notes]
+    return "\n".join(lines)
+
+
+def _format_validation(r: ValidationResult, *, redact: bool) -> str:
+    lines = [f"Validation result {r.id}: {r.outcome}", f"  {describe_outcome(r)}"]
+    if r.tool_versions:
+        lines.append("  Tools: " + ", ".join(r.tool_versions.values()))
+    for step in r.steps:
+        status = "timed out" if step.timed_out else f"exit code {step.exit_code}"
+        lines.append(f"  {step.label}: {status} ({step.duration_seconds}s)")
+        if not redact:
+            for label, text in (("output", step.stdout), ("errors", step.stderr)):
+                if text.strip():
+                    lines.append(f"    {label}:")
+                    lines += [f"      {line}" for line in text.splitlines()[:40]]
+    if not redact:
+        lines += [f"  Note: {note}" for note in r.notes]
+    lines.append("  Temporary copy deleted: " + ("yes" if r.copy_removed else "NO, delete it by hand"))
+    return "\n".join(lines)
+
+
+def _inspect(args: argparse.Namespace, key: str, group, inventory: Inventory, privacy) -> int:
+    source_approval = latest_file_approval(key, group.id)
+    build_approval = latest_build_approval(key, group.id)
+    if source_approval is None and build_approval is None:
+        raise UsageError("Nothing is approved for this group. Run approve-files and/or approve-build-files first.")
+    inspection = inspect_project(
+        inventory_key=key, group=group, inventory=inventory, proposal=propose_build_files(group, inventory, privacy),
+        source_approval=source_approval,
+        source_reader=ApprovedFileReader(source_approval, privacy) if source_approval else None,
+        build_approval=build_approval,
+        build_reader=ApprovedFileReader(build_approval, privacy, MAX_BUILD_FILE_BYTES) if build_approval else None,
+        identity_terms=local_identity_terms(),
+    )
+    save_inspection(inspection)
+    print(_format_inspection(inspection, redact=args.redact))
+    print("\nNothing was run and nothing was sent anywhere.")
+    return EXIT_OK
+
+
+def _validate(args: argparse.Namespace, key: str, group, privacy) -> int:
+    plan = load_validation_plan(key, group.id, args.plan)
+    base = {"plan_id": plan.id, "action": plan.action, "plan_sha256": plan.plan_sha256}
+    approval = find_validation_approval(plan)
+    source_approval = latest_file_approval(key, group.id)
+    try:
+        if approval is None:
+            raise ValidationRefused("This validation plan has no unused approval. Nothing was run.")
+        if source_approval is None or source_approval.id != plan.source_approval_id:
+            raise ValidationRefused("The file approval changed after this plan was made. Nothing was run.")
+        # Spent before anything runs, so a crash can never leave it reusable.
+        save_validation_approval(replace(approval, used_at=datetime.now(UTC)), plan)
+        result = execute_plan(plan, approval, ApprovedFileReader(source_approval, privacy), runner=make_runner)
+    except ValidationRefused as exc:
+        append_audit(key, group.id, {**base, "outcome": "refused", "reason": str(exc)})
+        raise
+    save_validation_result(result)
+    append_audit(key, group.id, {**base, "outcome": result.outcome,
+                                 "exit_codes": [s.exit_code for s in result.steps], "copy_removed": result.copy_removed})
+    print(_format_validation(result, redact=args.redact))
+    print(f"\nTo use this in the README: apply-inspection {group.id} <PROPOSAL>")
+    return EXIT_OK if result.outcome in ("compile_passed", "run_exit_zero") else EXIT_ERROR
+
+
 def _format_proposal(p, key: str, group_id: str, *, redact: bool, claims: bool) -> str:
     claim_list = p.all_claims()
     lines = [f"Proposal {p.id} ({p.status}; ownership: {p.ownership})",
@@ -259,7 +453,8 @@ def _format_proposal(p, key: str, group_id: str, *, redact: bool, claims: bool) 
     if redact:
         return "\n".join(lines)
     pack = latest_pack(key, group_id)
-    where = {i.id: i.location for i in pack.items} if pack else {}
+    augmented = latest_augmented_pack(key, group_id)
+    where = {i.id: i.location for source in (pack, augmented) if source for i in source.items}
 
     def show(label: str, c) -> None:
         mark = {"verified": "✓", "rejected": "✗", "your_wording": "✎"}.get(c.status, "?")
@@ -287,6 +482,11 @@ def _format_proposal(p, key: str, group_id: str, *, redact: bool, claims: bool) 
         mark = {"verified": "✓", "unverified": "⚠", "rejected": "✗"}[i.status]
         lines.append(f"    {mark} [{section}] {i.text}" + (f"  `{i.command}`" if i.command else "")
                      + (f"  — {i.reason}" if i.reason else ""))
+    if p.local_findings:
+        lines.append(f"  Local findings from inspection {p.local_findings.inspection_id}:")
+        lines += [f"    {'✓' if c.status == 'supported' else '⚠'} [{c.purpose}] {c.command}"
+                  for c in p.local_findings.commands]
+        lines += [f"    validation: {v.outcome}" for v in p.local_findings.validations]
     return "\n".join(lines)
 
 
@@ -345,6 +545,96 @@ def _run(args: argparse.Namespace, input_fn: Callable[[str], str]) -> int:
         print(f"Approved {len(record.files)} file(s) for local reading: {record.id}")
         return EXIT_OK
 
+    if args.command == "select-build-files":
+        proposal = propose_build_files(group, inventory, privacy)
+        print(f"{_title(group, args.redact)}: build configuration files")
+        for note in proposal.notes:
+            print(f"  {note}")
+        print(f"  Could be read ({len(proposal.candidates)}):")
+        for c in proposal.candidates:
+            label = c.file_id if args.redact else f"{c.project_path}  {c.file_id}"
+            print(f"    {label}  [{c.role}, {c.size_bytes:,} bytes]")
+        if proposal.blocked:
+            print(f"  May not be read ({len(proposal.blocked)}):")
+            for b in proposal.blocked:
+                print(f"    {'[hidden]' if args.redact else b.project_path}  ({b.reason})")
+        if proposal.review_only:
+            print(f"  Never read, because they often hold credentials ({len(proposal.review_only)}); review by hand:")
+            if not args.redact:
+                print("\n".join(f"    {path}" for path in proposal.review_only))
+        print(f"  Nothing has been read. Approve with: approve-build-files {group.id}")
+        return EXIT_OK
+
+    if args.command == "approve-build-files":
+        proposal = propose_build_files(group, inventory, privacy)
+        record = approve_build_files(inventory_key=key, group=group, eligibility=eligibility, proposal=proposal,
+                                     file_ids=args.files, acknowledge_review=args.acknowledge_review)
+        prompt = (f"PortfolioForge will read {len(record.files)} build configuration file(s) of "
+                  f"{_title(group, args.redact)} on this computer. Nothing is run or sent, and the files are not changed.")
+        if not _confirm(prompt, "approve", args, input_fn):
+            print("Not approved. Nothing was read.")
+            return EXIT_ERROR
+        save_build_approval(record)
+        print(f"Approved {len(record.files)} build file(s) for local reading: {record.id}")
+        return EXIT_OK
+
+    if args.command == "inspect":
+        return _inspect(args, key, group, inventory, privacy)
+
+    if args.command == "show-inspection":
+        inspection = latest_inspection(key, group.id)
+        if inspection is None:
+            raise UsageError("No inspection for this group. Run inspect first.")
+        print(_format_inspection(inspection, redact=args.redact))
+        return EXIT_OK
+
+    if args.command == "plan-validation":
+        inspection = latest_inspection(key, group.id)
+        approval = latest_file_approval(key, group.id)
+        if inspection is None or approval is None:
+            raise UsageError("Run approve-files and inspect first.")
+        plan = build_plan(inspection=inspection, source_approval=approval, reader=ApprovedFileReader(approval, privacy),
+                          action=args.action, entry_point=args.entry, timeout_seconds=args.timeout)
+        save_validation_plan(plan)
+        print(format_plan(plan, redact_names=args.redact))
+        print(f"\nNothing was run. To approve this exact plan: approve-validation {group.id} {plan.id}")
+        return EXIT_OK
+
+    if args.command == "approve-validation":
+        plan = load_validation_plan(key, group.id, args.plan)
+        print(format_plan(plan, redact_names=args.redact))
+        word = "run my code" if plan.runs_project_code else plan.action
+        try:  # never skippable, and refused when nobody is there to type
+            answer = input_fn(f"\nApprove this exact plan for one execution?\nType '{word}' to continue: ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() != word:
+            print("Not approved. Nothing was run.")
+            return EXIT_ERROR
+        approval = approve_plan(plan)
+        save_validation_approval(approval, plan)
+        append_audit(key, group.id, {"plan_id": plan.id, "action": plan.action, "plan_sha256": plan.plan_sha256,
+                                     "outcome": "validation_approved"})
+        print(f"Approved {approval.id} for one {plan.action}. Nothing has run yet. Next: validate {group.id} {plan.id}")
+        return EXIT_OK
+
+    if args.command == "validate":
+        return _validate(args, key, group, privacy)
+
+    if args.command == "apply-inspection":
+        proposal = load_proposal(key, group.id, args.proposal)
+        inspection = latest_inspection(key, group.id)
+        if inspection is None:
+            raise UsageError("No inspection for this group. Run inspect first.")
+        updated = apply_inspection(proposal, inspection, tuple(list_validation_results(key, group.id)))
+        save_proposal(updated)
+        print(f"Proposal {updated.id} updated from inspection {inspection.id}. Nothing was sent anywhere.")
+        print(f"  Review flags now: {len(updated.review_flags)}")
+        if not args.redact:
+            print("\n".join(f"    - {flag}" for flag in updated.review_flags))
+        print(f"  Regenerate the draft with: readme {group.id} {updated.id}")
+        return EXIT_OK
+
     if args.command == "extract":
         approval = latest_file_approval(key, group.id)
         if approval is None:
@@ -371,10 +661,29 @@ def _run(args: argparse.Namespace, input_fn: Callable[[str], str]) -> int:
         pack = latest_pack(key, group.id)
         if pack is None:
             raise UsageError("No evidence pack for this group. Run extract first.")
+        also_not_sent: tuple[str, ...] = ()
+        inspection = None
+        if args.with_inspection:
+            inspection = latest_inspection(key, group.id)
+            if inspection is None:
+                raise UsageError("No inspection for this group. Run inspect first.")
+            if inspection.manual_review_reason:
+                raise UsageError(f"Manual review needed, so there are no findings to add. "
+                                 f"{inspection.manual_review_reason}")
+            pack = build_augmented_pack(pack, inspection)
+            save_augmented_pack(pack)
+            also_not_sent = NOT_SENT_WITH_FINDINGS
         manifest, payload = build_manifest(pack, args.provider, model, max_tokens=args.max_tokens,
-                                           effort=args.effort)
+                                           effort=args.effort, also_not_sent=also_not_sent)
         save_manifest(manifest, payload)
         print(format_manifest(manifest, redact=args.redact))
+        if inspection is not None:
+            print("\nThis manifest adds confirmed local findings, so it is a new payload: earlier approvals do "
+                  "not cover it.")
+            high = sum(s.confidence == "high" for s in inspection.sensitive)
+            if high:
+                print(f"The inspection has {high} likely credential or identifier finding(s). Excerpts are redacted, "
+                      "but redaction can miss things: check show-inspection before approving.")
         print(f"\nNothing has been sent. To approve: approve-manifest {group.id} {manifest.id}")
         return EXIT_OK
 
@@ -462,4 +771,11 @@ def _run(args: argparse.Namespace, input_fn: Callable[[str], str]) -> int:
     print(f"  Evidence pack:    {pack.id + f' ({len(pack.items)} excerpts)' if pack else 'none'}")
     print(f"  Latest manifest:  {manifest.id if manifest else 'none'}"
           + (f" ({'approved' if find_manifest_approval(manifest) else 'not approved'})" if manifest else ""))
+    build_approval = latest_build_approval(key, group.id)
+    inspection = latest_inspection(key, group.id)
+    results = list_validation_results(key, group.id)
+    print(f"  Build files approved: {len(build_approval.files) if build_approval else 0}")
+    found = f"{inspection.id} ({len(inspection.sensitive)} possible sensitive finding(s))" if inspection else "none"
+    print(f"  Inspection:       {found}")
+    print(f"  Latest validation: {results[-1].outcome if results else 'none'}")
     return EXIT_OK

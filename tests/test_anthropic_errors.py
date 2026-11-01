@@ -146,10 +146,11 @@ def test_long_messages_are_truncated(world):
     assert len(text) <= 301 and text.endswith("…")
 
 
-def test_connection_errors_report_the_type_only(world):
+def test_connection_errors_report_type_phase_and_message(world):
     body, _ = _body(world)
-    assert str(describe_api_error(APIConnectionError("could not reach host"), body)) == \
-        "Anthropic request failed: APIConnectionError"
+    text = str(describe_api_error(APIConnectionError("could not reach host"), body))
+    assert text.startswith("Anthropic request failed: APIConnectionError during ")
+    assert text.endswith(": could not reach host")
 
 
 def test_untrusted_request_ids_are_not_shown(world):
