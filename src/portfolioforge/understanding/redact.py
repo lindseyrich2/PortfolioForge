@@ -12,6 +12,11 @@ from collections import Counter
 
 from ..devtools.privacy_check import _SECRET_PATTERNS
 
+# Unquoted environment-variable style assignments (API_TOKEN=abc123) in commands and .env text.
+# Upper-case names and no spaces only, so code such as `token = tokenizer.tokenize(x)` is kept.
+_UNQUOTED_SECRET = re.compile(
+    r"\b([A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*)(=)(?!['\"\[$%{])([^\s'\"]{6,})"
+)
 _EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 _WINDOWS_PATH = re.compile(r"(?<![\w])[A-Za-z]:[\\/][^\s\"'<>|*?`,;)]+")
 _UNC_PATH = re.compile(r"\\\\[^\s\"'<>|*?`]+")
@@ -56,6 +61,7 @@ def redact(text: str) -> tuple[str, dict[str, int]]:
         text = sub(pattern, "secret", PLACEHOLDERS["secret"], text)
     text = sub(_ASSIGNED_SECRET, "secret", lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}{PLACEHOLDERS['secret']}"
                f"{m.group(3)}", text)
+    text = sub(_UNQUOTED_SECRET, "secret", lambda m: f"{m.group(1)}{m.group(2)}{PLACEHOLDERS['secret']}", text)
     text = sub(_EMAIL, "email", PLACEHOLDERS["email"], text)
     for pattern in (_WINDOWS_PATH, _UNC_PATH, _POSIX_HOME):
         text = sub(pattern, "path", PLACEHOLDERS["path"], text)

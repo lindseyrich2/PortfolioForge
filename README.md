@@ -11,14 +11,15 @@ Past projects, especially academic ones, tend to be scattered: course folders on
 | **Local file inventory** (targeted folders or the whole computer) | ✅ Implemented |
 | **Privacy safeguards and local data management** | ✅ Implemented |
 | **Candidate grouping** of files into courses, assignments and projects (metadata only, reviewed by you) | ✅ Implemented |
-| **Analysis preparation**: eligibility filter, file approval, local evidence extraction, redaction, disclosure manifest, dry-run provider | ✅ Implemented (no AI provider connected) |
-| AI project understanding with a real provider, and descriptive naming ([design](docs/design/project-understanding-and-naming.md)) | 🗓️ Planned |
+| **Analysis preparation**: eligibility filter, file approval, local evidence extraction, redaction, disclosure manifest, dry-run provider | ✅ Implemented |
+| **AI project understanding and naming** (Anthropic, approval-gated, locally verified; [design](docs/design/project-understanding-and-naming.md)) | ✅ Implemented, opt-in; never runs without your approvals |
+| Local validation of run/test instructions (separately approved, sandboxed) | 🗓️ Planned |
 | AI analysis of code, notebooks and documents | 🗓️ Planned |
 | Google Drive and Google Colab sources | 🗓️ Planned |
 | Documentation generation | 🗓️ Planned |
 | Publishing to GitHub (after approval) | 🗓️ Planned |
 
-Nothing in the current release uses an AI model, a cloud service, or the network.
+Nothing in PortfolioForge contacts an AI model or any other service unless you explicitly approve a disclosure manifest and then confirm sending it. Nothing is ever published.
 
 ## Local file inventory
 
@@ -327,7 +328,68 @@ Approvals, evidence packs, manifests, payloads and the audit log are stored in `
 - **Python files that don't parse fall back to imports and definition lines only.**
 - **Redaction is pattern-based** and can miss unusual personal details, so review the manifest and payload before approving.
 - **Data schema extraction and document reading aren't implemented yet.**
-- **Real AI providers, claim verification and naming are the next stages.**
+
+## AI project understanding and naming (optional)
+
+The optional `ai` extra adds one AI provider, Anthropic. It sends nothing unless you approve a manifest *for Anthropic*, for the exact payload and model, and then type `send`.
+
+```powershell
+pip install -e ".[ai]"     # optional: the Anthropic SDK
+# Credentials: ANTHROPIC_API_KEY, an `ant auth login` profile, or PORTFOLIOFORGE_ANTHROPIC_API_KEY.
+# PortfolioForge never stores, prints or logs them.
+python -m portfolioforge.understanding manifest <GROUP> --provider anthropic   # default: claude-sonnet-5-5, effort medium
+python -m portfolioforge.understanding manifest <GROUP> --provider anthropic --model claude-opus-5-5   # optional: Opus
+python -m portfolioforge.understanding approve-manifest <GROUP> <MANIFEST>   # review first; marked EXTERNAL
+python -m portfolioforge.understanding submit <GROUP> <MANIFEST>             # asks you to type 'send'
+python -m portfolioforge.understanding show-proposal <GROUP> <PROPOSAL> [--claims]
+python -m portfolioforge.understanding readme <GROUP> <PROPOSAL>             # writes the draft README locally
+python -m portfolioforge.understanding edit-proposal <GROUP> <PROPOSAL> --title "..." --name my-repo-name
+python -m portfolioforge.understanding accept-proposal <GROUP> <PROPOSAL> --name <SLUG> [--acknowledge-flags]
+```
+
+**What is sent.**
+- The approved payload *is* the complete request: the model, `max_tokens`, effort, a fixed system prompt, a fixed output schema, and the redacted evidence excerpts.
+- The adapter sends exactly those fields; nothing else is added.
+- Every approval is bound to one payload hash, one provider and one model. A dry-run approval can never authorize an Anthropic submission.
+- The manifest shows every component of the request: the fields, model, `max_tokens`, effort, and the SHA-256 of the system prompt, the output schema and the evidence message. Changing any of them produces a different hash, so it needs a new manifest and a new approval. Editing a saved manifest or payload invalidates the approval too.
+- No fallback model is used, so only the model you approved ever sees the content.
+- **Cost:** the manifest and the final `send` prompt show a conservative *upper-bound* estimate. It's based on the model's published price, about 1 token per 3 bytes of payload plus structured-output overhead, and the full `max_tokens` of output (thinking counts toward it). It isn't an exact charge; check current pricing.
+
+**What comes back.** A structured answer covering:
+- purpose and key functionality
+- languages and technologies
+- engineering concepts
+- uncertainties and possible third-party or template code
+- 2–3 repository name suggestions, a title and a summary
+- a draft README
+- a setup, run and test guide
+
+**Every claim is verified locally against the excerpts that were sent.** Rejected claims are shown for review but never used:
+- claims citing no evidence, or evidence that wasn't sent
+- numbers or outcome wording ("accuracy", "achieves", "outperforms") not found in the cited excerpts
+- technologies not in imports or dependencies
+- any authorship or first-person wording
+
+**Repository names** must be valid GitHub names and descriptive. Homework numbers, course codes, IDE default names and words like "assignment" or "lab" are rejected.
+
+**The README's setup, run and test sections** cover the *original* project:
+- steps backed by the project's own files are marked **✓**, and steps those files don't confirm are marked **⚠ Unverified suggestion**, with a legend in the README
+- invented dependencies are rejected
+- commands mentioning files or tools that aren't in the evidence are marked **⚠ Unverified suggestion**
+- for older projects, a compatibility section explains how to run the code as written (original versions in a separate environment), with modern alternatives listed only as suggestions
+- claims that tests pass are rejected
+- credentials are redacted
+- compatibility notes separate the original requirement from a suggested modern alternative, which is never applied
+
+When the excerpts aren't enough to tell how to run or test the project, the proposal is flagged for an additional approved local inspection. The README always states that its instructions haven't been run.
+
+**Review and ownership.**
+- Proposals, raw responses and README drafts stay in your data folder.
+- Your edits are labelled as your wording.
+- Accepting a proposal records the name you chose. It never creates a repository or publishes anything.
+- Ownership is never inferred: proposals always say `ownership: unconfirmed`.
+
+**Live tests are opt-in.** `PORTFOLIOFORGE_RUN_NETWORK_TESTS=1 pytest -m network` sends a tiny *synthetic* evidence pack to Anthropic. All other tests use mocked responses and block network access.
 
 ## Privacy and your data
 
@@ -347,7 +409,7 @@ PortfolioForge works with the names and locations of your personal files, so it 
 These are enforced by the code and checked by automated tests:
 
 - **It never opens your files.** No file contents are read, executed, modified, moved or deleted; only directory listings are used. Tests run a full scan with file opening, writing, running programs and network connections all made to fail.
-- **Nothing leaves your computer.** There are no network calls, no telemetry, no cloud connections and no AI calls. Cloud-only placeholders are never downloaded.
+- **Nothing leaves your computer without your approval.** There's no telemetry and no cloud connection, and cloud-only placeholders are never downloaded. The only network call PortfolioForge can make is the optional Anthropic request, which needs file approval, approval of the exact payload for that provider and model, and a typed `send` confirmation.
 - **Results stay out of Git.** Results are written only to your data folder; PortfolioForge refuses any output folder inside a Git repository, and `.gitignore` also blocks `*.jsonl` and the results folders.
 - **Sensitive names are never recorded.** Credential-looking files are skipped, and their names are redacted from every result.
 - **Private folders are skipped entirely** (see below).
@@ -390,7 +452,8 @@ python -m portfolioforge.data where             # where data and settings are st
 - **Sharing is up to you.** If you paste terminal output, results files or reports into a chat, an issue or an AI assistant, that information leaves your computer. Use `--redact`, `data list` and `data stats` when you need to share something.
 - **Name-based filters can miss private folders.** Private folders and credential files are recognized by name, so a private folder with an unusual name is only skipped if you add it to `privacy.toml`.
 - **"Never opens files" is a code guarantee, not an operating-system sandbox.** It is enforced by the design, by code review and by tests; Python cannot sandbox itself.
-- **Future AI analysis will be opt-in.** It isn't part of this release. When added, it will require separate approval of the specific files, and will show exactly what would be sent to which AI provider before anything is sent. Once data reaches a provider, its retention policy applies.
+- **Once data reaches an AI provider, that provider's retention policy applies.** AI analysis is opt-in and approval-gated, but anything you send can't be recalled. Review the manifest and the saved payload before approving.
+- **Redaction and verification are pattern-based.** They reduce, but can't eliminate, the chance that a personal detail in a code comment is sent, or that a subtly wrong description slips through. Your review is the final check.
 
 ### For contributors
 
@@ -454,6 +517,8 @@ PortfolioForge/
 │   │   ├── eligibility.py, selection.py   # metadata-only eligibility; Gate 1 file approval
 │   │   ├── reader.py, extract.py, redact.py   # guarded reader; evidence extraction; redaction
 │   │   ├── disclosure.py           # manifest, Gate 2 approval, send gate, dry-run provider
+│   │   ├── anthropic_provider.py   # Anthropic adapter: sends exactly the approved request body
+│   │   ├── analysis.py             # output schema, local claim/instruction verification, proposals
 │   │   └── store.py, models.py, cli.py
 │   ├── grouping/                   # metadata-only candidate grouping (python -m portfolioforge.grouping)
 │   │   ├── features.py, index.py   # name features; folder tree from the saved inventory

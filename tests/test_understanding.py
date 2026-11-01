@@ -462,8 +462,15 @@ def test_redaction_rules(text, kind):
 
 
 def test_ordinary_code_is_not_redacted():
-    code = "name = input('Your name: ')\nemail_count = 3\nstudent_scores = []\n"
+    code = ("name = input('Your name: ')\nemail_count = 3\nstudent_scores = []\n"
+            "token = tokenizer.tokenize(text)\nkey = sorted(items)[0]\nTOKEN_LIMIT=$LIMIT\n")
     assert redact(code) == (code, {})
+
+
+def test_unquoted_environment_secrets_are_redacted():
+    value = "abc" + "DEF123xyz"
+    cleaned, counts = redact(f"export API_TOKEN={value} && python app.py")
+    assert value not in cleaned and "API_TOKEN=[secret removed]" in cleaned and counts == {"secret": 1}
 
 
 # --- disclosure manifest and enforcement (Gate 2) ---------------------------------------
@@ -513,8 +520,8 @@ def test_dry_run_sends_nothing_externally(world, monkeypatch):
     assert provider.received == [payload]
 
 
-@pytest.mark.parametrize("name", [None, "", "anthropic", "openai", "claude"])
-def test_there_is_no_default_or_real_provider(name):
+@pytest.mark.parametrize("name", [None, "", "openai", "claude", "Anthropic"])
+def test_there_is_no_default_provider_and_unknown_names_fail(name):
     with pytest.raises(ProviderNotConfigured):
         get_provider(name)
 

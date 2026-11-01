@@ -164,6 +164,8 @@ class DisclosureManifest:
     payload_sha256: str
     created_at: datetime
     notice: str
+    request: dict[str, Any] = field(default_factory=dict)
+    """Request parameters shown to the user (format, max_tokens, effort, external)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,7 +235,8 @@ def pack_from_dict(d: dict[str, Any]) -> EvidencePack:
 def manifest_from_dict(d: dict[str, Any]) -> DisclosureManifest:
     return DisclosureManifest(
         **{**d, "items": tuple(ManifestItem(**{**i, "redactions": dict(i["redactions"])}) for i in d["items"]),
-           "not_sent": tuple(d["not_sent"]), "created_at": datetime.fromisoformat(d["created_at"])}
+           "not_sent": tuple(d["not_sent"]), "created_at": datetime.fromisoformat(d["created_at"]),
+           "request": dict(d.get("request", {}))}
     )
 
 

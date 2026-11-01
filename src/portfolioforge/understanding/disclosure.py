@@ -7,8 +7,10 @@ payload's SHA-256. ``submit`` refuses to hand anything to a provider unless the
 user approved that manifest, for that provider and model, and the payload's
 hash still matches.
 
-No real AI provider exists in this version: only the dry-run provider, which
-sends nothing anywhere. There is no default provider.
+Providers: the dry-run provider (sends nothing) and the Anthropic adapter
+(:mod:`.anthropic_provider`). There is no default provider. An approval binds one
+manifest id, one payload hash, one provider and one model, so a dry-run approval
+can never authorize an Anthropic submission.
 """
 
 from __future__ import annotations
@@ -74,13 +76,28 @@ class DryRunProvider:
                               payload_sha256=hashlib.sha256(payload).hexdigest(), status="dry_run_not_sent")
 
 
-def get_provider(name: str | None, model: str | None = None) -> Provider:
-    """Only the dry-run provider exists. There is deliberately no default provider."""
+PROVIDERS = ("dry-run", "anthropic")
+
+
+def get_provider(name: str | None, model: str | None = None, client: object | None = None) -> Provider:
+    """Return the named provider. There is deliberately no default provider.
+
+    Creating a provider never contacts anything; only ``submit`` with a matching
+    approval can lead to a request.
+    """
     if name == DryRunProvider.name:
         return DryRunProvider(model or "dry-run")
+    if name == "anthropic":
+        from .analysis import DEFAULT_ANTHROPIC_MODEL
+        from .anthropic_provider import AnthropicProvider
+        return AnthropicProvider(model or DEFAULT_ANTHROPIC_MODEL, client=client)
     raise ProviderNotConfigured(
-        "No AI provider is configured. Only '--provider dry-run' is available in this version."
+        f"Unknown or missing provider. Choose one explicitly: {', '.join(PROVIDERS)}."
     )
+
+
+def canonical(value: object) -> bytes:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def build_payload(pack: EvidencePack) -> bytes:
@@ -109,10 +126,37 @@ def build_payload(pack: EvidencePack) -> bytes:
     return json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def build_manifest(pack: EvidencePack, provider: str, model: str,
-                   now: datetime | None = None) -> tuple[DisclosureManifest, bytes]:
-    payload = build_payload(pack)
-    sent_ids = {e["id"] for e in json.loads(payload)["evidence"]}
+def build_manifest(pack: EvidencePack, provider: str, model: str, now: datetime | None = None, *,
+                   max_tokens: int | None = None, effort: str | None = None) -> tuple[DisclosureManifest, bytes]:
+    """The manifest and the exact bytes that would be sent.
+
+    For the dry-run provider the payload is the evidence document. For Anthropic it
+    is the complete Messages API request body: model, max_tokens, effort, the fixed
+    system prompt and output schema, and the evidence document as the only message.
+    """
+    evidence_payload = build_payload(pack)
+    document = json.loads(evidence_payload)
+    request: dict = {"format": "evidence_document"}
+    if provider == "anthropic":
+        from .analysis import DEFAULT_EFFORT, DEFAULT_MAX_TOKENS, anthropic_request_body, cost_estimate
+        body = anthropic_request_body(document, model, max_tokens or DEFAULT_MAX_TOKENS, effort or DEFAULT_EFFORT)
+        payload = canonical(body)
+
+        def sha(value: object) -> str:
+            return hashlib.sha256(canonical(value)).hexdigest()
+
+        # Every component is shown; the approval covers the hash of the whole body.
+        request = {"format": "anthropic_messages_request", "external": True,
+                   "model": body["model"], "max_tokens": body["max_tokens"],
+                   "effort": body["output_config"]["effort"],
+                   "system_prompt_bytes": len(body["system"].encode()), "system_prompt_sha256": sha(body["system"]),
+                   "output_schema_sha256": sha(body["output_config"]["format"]),
+                   "messages_sha256": sha(body["messages"]),
+                   "fields": sorted(body),
+                   "cost": cost_estimate(len(payload), body["model"], body["max_tokens"])}
+    else:
+        payload = evidence_payload
+    sent_ids = {e["id"] for e in document["evidence"]}
     items = tuple(
         ManifestItem(i.id, i.location, i.kind, len(i.text.encode("utf-8")), i.redactions)
         for i in pack.items if i.id in sent_ids
@@ -127,7 +171,7 @@ def build_manifest(pack: EvidencePack, provider: str, model: str,
         id=stable_id("m", pack.id, provider, model, digest), inventory_key=pack.inventory_key,
         group_id=pack.group_id, evidence_pack_id=pack.id, provider=provider, model=model, items=items,
         not_sent=tuple(not_sent), payload_bytes=len(payload), estimated_tokens=math.ceil(len(payload) / 4),
-        payload_sha256=digest, created_at=created, notice=RETENTION_NOTICE,
+        payload_sha256=digest, created_at=created, notice=RETENTION_NOTICE, request=request,
     )
     return manifest, payload
 
@@ -153,13 +197,32 @@ def submit(manifest: DisclosureManifest, payload: bytes, approval: ManifestAppro
 
 
 def format_manifest(manifest: DisclosureManifest, *, redact: bool = False) -> str:
+    external = manifest.provider != DryRunProvider.name
     lines = [
         f"Disclosure manifest {manifest.id}",
-        f"  Provider / model:  {manifest.provider} / {manifest.model}",
+        f"  Provider / model:  {manifest.provider} / {manifest.model}"
+        + ("   ** EXTERNAL: approving and submitting sends this content to Anthropic **" if external else ""),
         f"  Payload:           {manifest.payload_bytes:,} bytes (about {manifest.estimated_tokens:,} tokens)",
         f"  Payload SHA-256:   {manifest.payload_sha256}",
         f"  Excerpts to send:  {len(manifest.items)}",
     ]
+    r = manifest.request
+    if r.get("format") == "anthropic_messages_request":
+        lines += [
+            f"  Request fields:    {', '.join(r.get('fields', []))} (nothing else is sent; no fallback models)",
+            f"    model {r.get('model', manifest.model)}, max_tokens {r['max_tokens']}, effort {r['effort']}",
+            f"    system prompt    {r['system_prompt_bytes']:,} bytes, SHA-256 {r.get('system_prompt_sha256', '?')[:16]}…",
+            f"    output schema    SHA-256 {r.get('output_schema_sha256', '?')[:16]}…",
+            f"    evidence message SHA-256 {r.get('messages_sha256', '?')[:16]}…",
+            "    Approval covers the SHA-256 of this whole request; changing any part requires a new manifest.",
+        ]
+        cost = r.get("cost") or {}
+        if cost:
+            price = (f"at most about ${cost['max_cost_usd']:.2f}" if "max_cost_usd" in cost
+                     else "price unknown for this model")
+            lines.append(f"  Cost estimate:     {price} (≈{cost['input_tokens_estimate']:,} input tokens, up to "
+                         f"{cost['max_output_tokens']:,} output tokens incl. thinking). A conservative upper bound "
+                         f"from prices checked {cost['prices_checked']}, not an exact charge; check current pricing.")
     totals: dict[str, int] = {}
     for item in manifest.items:
         for kind, n in item.redactions.items():

@@ -1,19 +1,22 @@
 # Design: Project Understanding and Naming (future stage)
 
-Status: **approved design, partly implemented.**
+Status: **approved design, mostly implemented.**
 - **Implemented** (`portfolioforge.understanding`):
-  - the eligibility filter
-  - Gate 1 file approval
+  - the eligibility filter and Gate 1 file approval
   - local evidence extraction and redaction
-  - the disclosure manifest with Gate 2 approval
-  - the send gate and a dry-run provider
+  - the disclosure manifest and Gate 2 approval
+  - the send gate, with a dry-run provider and an Anthropic adapter
+  - structured AI understanding, with local verification of every claim
+  - name suggestions with GitHub-name rules
+  - a draft README with setup, run and test instructions
+  - local proposal review: edit and accept, with a local check that a chosen name isn't already in use
 - **Not implemented:**
-  - real AI providers
-  - AI understanding and claim verification
-  - naming, collisions and provenance
+  - provenance records and `PROVENANCE.md`
+  - checking your existing GitHub repository names for collisions (opt-in)
+  - local run/test validation (see below)
   - publishing
 
-Nothing in PortfolioForge sends file contents to an AI provider.
+Nothing is sent to a provider without both approvals and a final typed confirmation. Nothing is published.
 
 ## Goal
 
@@ -108,6 +111,42 @@ Names are built only from verified claims. Several candidates are offered, each 
 
 - **A non-AI fallback** fills naming templates from locally verified technologies.
 - **Naming conventions are configurable:** case, prefix, banned words, whether to include a language hint.
+
+## Model, cost and approval binding (implemented)
+
+- **Model:** defaults to `claude-sonnet-5-5` at effort `medium` (checked against the official models and pricing pages on 2026-11-01). `claude-opus-5-5` is an explicit `--model` option. Thinking is left at the default, adaptive.
+- **Cost:** the manifest and the final send prompt show a conservative upper bound: estimated input tokens plus the full `max_tokens`, at the published price. It's labelled as an estimate, not an exact charge.
+- **Approval binding:** the approved payload is the complete Messages API request body. The manifest shows the fields, model, `max_tokens`, effort and the hashes of the system prompt, schema and evidence message. Any change produces a new hash and needs a new approval.
+
+## Setup, run and test instructions in the README
+
+The structured output includes a `usage_guide`:
+- prerequisites and dependencies
+- setup steps, run commands and test instructions
+- data and configuration: datasets, configuration files, environment variable *names* and sample inputs
+- compatibility notes, each stating the original requirement and, separately, a suggested modern alternative
+- missing information
+- `needs_local_inspection`
+
+Every step is verified locally:
+
+- **Dependencies** must appear in imports or dependency files. Invented ones are rejected.
+- **Commands** must use a recognized tool, and every file they mention must be in the evidence. Otherwise they're kept, labelled **⚠ Unverified**.
+- **Inferred steps,** and steps without evidence, are labelled unverified.
+- **Any claim that tests passed or that the project was run is rejected.** PortfolioForge has not run anything.
+- **Credentials** in commands or text are redacted. Only environment variable names are kept.
+- **Expected results** must use numbers that appear in the cited evidence.
+- **Missing run or test information,** or `needs_local_inspection`, raises a review flag asking for an additional approved local inspection instead of a guess.
+
+The README always states that the instructions haven't been run, and that the original code is unchanged. Legacy projects are never upgraded or modified; modern alternatives are suggestions only.
+
+## Future: optional local validation of run/test instructions (approved requirement, not implemented)
+
+A separate, explicitly approved step will check whether the documented run and test instructions actually work, without executing untrusted code automatically. Planned constraints:
+- **Its own approval gate per project,** showing the exact commands to be run.
+- **Execution only in an isolated, disposable copy,** never the original files, inside a sandbox with no network access, resource and time limits, and no access to personal folders.
+- **No automatic execution:** the user confirms each run.
+- **Recorded results** (exit codes, durations, summarized output, all redacted), so README claims such as "tests pass" can be backed by a recorded, user-approved run rather than by the model.
 
 ## Collisions
 

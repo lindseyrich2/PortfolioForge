@@ -64,8 +64,14 @@ def test_full_preparation_workflow_with_dry_run(setup, capsys):
     assert code == 0 and "4 of 4 approved file(s) read" in out and "scikit-learn" in out
     assert not (setup["tmp"] / "EXECUTED.txt").exists()
 
-    code, _, err = _cli(capsys, "manifest", spam, "--provider", "anthropic")
-    assert code == 1 and "No AI provider is configured" in err
+    code, out, _ = _cli(capsys, "manifest", spam, "--provider", "anthropic")
+    assert code == 0 and "EXTERNAL" in out and "claude-sonnet-5-5" in out  # reasonably priced default
+    assert "not an exact charge" in out
+    external_id = re.search(r"Disclosure manifest (m_\w+)", out).group(1)
+    code, out, _ = _cli(capsys, "manifest", spam, "--provider", "anthropic", "--model", "claude-opus-5-5")
+    assert code == 0 and "anthropic / claude-opus-5-5" in out  # Opus is an explicit option
+    code, _, err = _cli(capsys, "dry-run", spam, external_id)
+    assert code == 1 and "external provider" in err  # the dry-run command never sends for real
     code, out, _ = _cli(capsys, "manifest", spam, "--provider", "dry-run")
     assert code == 0 and "Provider / model:  dry-run / dry-run" in out and "Will NOT be sent" in out
     manifest_id = re.search(r"Disclosure manifest (m_\w+)", out).group(1)

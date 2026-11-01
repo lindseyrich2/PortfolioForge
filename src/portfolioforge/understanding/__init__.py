@@ -11,11 +11,24 @@ Pipeline, with two explicit approval gates:
 4. :func:`build_manifest` / :func:`approve_manifest` - **Gate 2**: the exact
    payload, provider and model, approved by SHA-256.
 5. :func:`submit` - the only path to a provider; refuses anything unapproved.
-   Only :class:`DryRunProvider` exists, and it sends nothing.
+   Providers: :class:`DryRunProvider` (sends nothing) and :class:`AnthropicProvider`.
+6. :func:`build_proposal` - verifies the model's structured answer locally and
+   produces names, a summary and a draft README (with setup/run/test steps);
+   :func:`edit_proposal` / :func:`accept_proposal` record your review. Nothing
+   is ever published, and ownership is never inferred.
 
 See docs/design/project-understanding-and-naming.md.
 """
 
+from .analysis import (
+    AnalysisProposal,
+    InvalidModelOutput,
+    ProposalError,
+    accept_proposal,
+    build_proposal,
+    edit_proposal,
+)
+from .anthropic_provider import AnthropicProvider, ProviderRequestFailed
 from .disclosure import (
     DisclosureNotApproved,
     DryRunProvider,
@@ -44,6 +57,8 @@ from .redact import redact
 from .selection import ApprovalError, approve_files, propose_selection
 
 __all__ = [
+    "AnalysisProposal", "AnthropicProvider", "InvalidModelOutput", "ProposalError", "ProviderRequestFailed",
+    "accept_proposal", "build_proposal", "edit_proposal",
     "ADMIN_WORDS", "ApprovalError", "ApprovedFileReader", "DisclosureManifest", "DisclosureNotApproved",
     "DryRunProvider", "Eligibility", "EligibilityStatus", "EvidenceItem", "EvidencePack", "FileApprovalRecord",
     "ManifestApproval", "ProviderNotConfigured", "ProviderResult", "ReadRefused", "SelectionProposal",

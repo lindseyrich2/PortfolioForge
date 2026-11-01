@@ -6,6 +6,9 @@
         manifest-<id>.json        what would be sent, and to whom
         payload-<id>.json         the exact payload bytes, for inspection
         disclosure-approval-<id>.json Gate 2 records
+        response-<manifest>-<hash>.json   a provider's raw answer (local only)
+        proposal-<id>.json        verified analysis and naming proposal, with your edits
+        README-draft-<id>.md      draft README rendered from verified claims
         audit.jsonl               every send attempt (no content)
 
 Never inside a Git repository. Evidence and payloads contain excerpts of your
@@ -14,11 +17,15 @@ code: keep them private.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, TypeVar
+
+if TYPE_CHECKING:
+    from .analysis import AnalysisProposal
 
 from ..paths import data_dir, ensure_safe_output_dir
 from .models import (
@@ -116,6 +123,53 @@ def find_manifest_approval(manifest: DisclosureManifest) -> ManifestApproval | N
         if approval.manifest_id == manifest.id:
             return approval
     return None
+
+
+def save_response(inventory_key: str, group_id: str, manifest_id: str, text: str) -> Path:
+    """Keep the provider's raw answer locally, for inspection only."""
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+    return _write(group_dir(inventory_key, group_id), f"response-{_safe_part(manifest_id)}-{digest}.json", text)
+
+
+def save_proposal(proposal: "AnalysisProposal") -> Path:
+    return _write(group_dir(proposal.inventory_key, proposal.group_id), f"proposal-{proposal.id}.json",
+                  dumps(proposal))
+
+
+def load_proposal(inventory_key: str, group_id: str, proposal_id: str) -> "AnalysisProposal":
+    from .analysis import proposal_from_dict
+    path = group_dir(inventory_key, group_id) / f"proposal-{_safe_part(proposal_id)}.json"
+    if not path.is_file():
+        raise FileNotFoundError("No such proposal.")
+    return proposal_from_dict(json.loads(path.read_text(encoding="utf-8")))
+
+
+def list_proposals(inventory_key: str, group_id: str) -> list["AnalysisProposal"]:
+    from .analysis import proposal_from_dict
+    folder = group_dir(inventory_key, group_id)
+    if not folder.is_dir():
+        return []
+    return sorted((proposal_from_dict(json.loads(p.read_text(encoding="utf-8")))
+                   for p in folder.glob("proposal-*.json")), key=lambda p: p.created_at)
+
+
+def accepted_names(inventory_key: str, *, except_group: str | None = None) -> set[str]:
+    """Repository names already accepted for other projects (local collision check)."""
+    base = data_dir() / "understanding" / _safe_part(inventory_key)
+    if not base.is_dir():
+        return set()
+    from .analysis import proposal_from_dict
+    names = set()
+    for path in base.glob("*/proposal-*.json"):
+        proposal = proposal_from_dict(json.loads(path.read_text(encoding="utf-8")))
+        if proposal.accepted_name and proposal.group_id != except_group:
+            names.add(proposal.accepted_name)
+    return names
+
+
+def save_readme(proposal: "AnalysisProposal") -> Path:
+    return _write(group_dir(proposal.inventory_key, proposal.group_id), f"README-draft-{proposal.id}.md",
+                  proposal.readme_markdown())
 
 
 def append_audit(inventory_key: str, group_id: str, entry: dict[str, Any]) -> Path:

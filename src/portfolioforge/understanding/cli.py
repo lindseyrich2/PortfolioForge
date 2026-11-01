@@ -5,17 +5,23 @@
     approve-files GROUP [--file ID ...] [--acknowledge-review] [--yes]
                                             Gate 1: allow these files to be read on this computer
     extract GROUP                           read approved files locally; build a redacted evidence pack
-    manifest GROUP --provider dry-run       show exactly what would be sent, to whom, and how much
-    approve-manifest GROUP MANIFEST [--yes] Gate 2: approve that exact payload for that provider
-    dry-run GROUP MANIFEST                  run the send path with the dry-run provider (sends nothing)
+    manifest GROUP --provider {dry-run,anthropic} [--model M]
+                                            show exactly what would be sent, to whom, and how much
+    approve-manifest GROUP MANIFEST [--yes] Gate 2: approve that exact payload for that provider and model
+    dry-run GROUP MANIFEST                  run a dry-run manifest through the send path (sends nothing)
+    submit GROUP MANIFEST                   send an approved external manifest (asks you to type 'send')
+    proposals GROUP | show-proposal GROUP PROPOSAL [--claims] | readme GROUP PROPOSAL
+    edit-proposal GROUP PROPOSAL [--title] [--summary] [--name]
+    accept-proposal GROUP PROPOSAL --name SLUG [--acknowledge-flags]
     status GROUP
 
-No AI provider is connected in this version, and there is no default provider.
+There is no default provider. Nothing is ever published or created on GitHub.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections import Counter
 from typing import Callable, Sequence
@@ -26,7 +32,19 @@ from ..grouping.store import load_run
 from ..inventory.cli import format_error
 from ..inventory.models import Inventory
 from ..privacy import PrivacyConfigError, load_privacy_settings
+from .analysis import (
+    DEFAULT_ANTHROPIC_MODEL,
+    DEFAULT_EFFORT,
+    DEFAULT_MAX_TOKENS,
+    InvalidModelOutput,
+    ProposalError,
+    accept_proposal,
+    build_proposal,
+    edit_proposal,
+)
+from .anthropic_provider import ProviderRequestFailed
 from .disclosure import (
+    PROVIDERS,
     DisclosureNotApproved,
     ProviderNotConfigured,
     approve_manifest,
@@ -41,16 +59,22 @@ from .models import EligibilityStatus
 from .reader import ApprovedFileReader
 from .selection import ApprovalError, approve_files, propose_selection
 from .store import (
+    accepted_names,
     append_audit,
     find_manifest_approval,
     latest_file_approval,
     latest_manifest,
     latest_pack,
+    list_proposals,
     load_manifest,
+    load_proposal,
     save_file_approval,
     save_manifest,
     save_manifest_approval,
     save_pack,
+    save_proposal,
+    save_readme,
+    save_response,
 )
 
 EXIT_OK = 0
@@ -78,8 +102,35 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("extract").add_argument("group")
     manifest = sub.add_parser("manifest")
     manifest.add_argument("group")
-    manifest.add_argument("--provider", required=True, help="only 'dry-run' is available")
-    manifest.add_argument("--model", default="dry-run")
+    manifest.add_argument("--provider", required=True, choices=PROVIDERS,
+                          help="dry-run (sends nothing) or anthropic (external, needs approval)")
+    manifest.add_argument("--model", help=f"default: dry-run, or {DEFAULT_ANTHROPIC_MODEL} for anthropic")
+    manifest.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
+    manifest.add_argument("--effort", choices=("low", "medium", "high", "xhigh", "max"), default=DEFAULT_EFFORT)
+    send = sub.add_parser("submit", help="send an approved manifest to its (external) provider")
+    send.add_argument("group")
+    send.add_argument("manifest")
+    send.add_argument("--yes", action="store_true", help="skip the final 'send' confirmation")
+    sub.add_parser("proposals").add_argument("group")
+    show = sub.add_parser("show-proposal")
+    show.add_argument("group")
+    show.add_argument("proposal")
+    show.add_argument("--claims", action="store_true", help="also show evidence references for each claim")
+    readme = sub.add_parser("readme", help="write the draft README locally")
+    readme.add_argument("group")
+    readme.add_argument("proposal")
+    readme.add_argument("--print", action="store_true", dest="print_readme")
+    edit = sub.add_parser("edit-proposal")
+    edit.add_argument("group")
+    edit.add_argument("proposal")
+    edit.add_argument("--title")
+    edit.add_argument("--summary")
+    edit.add_argument("--name", help="add your own repository name")
+    accept = sub.add_parser("accept-proposal")
+    accept.add_argument("group")
+    accept.add_argument("proposal")
+    accept.add_argument("--name", required=True, help="one of the valid suggested (or your own) names")
+    accept.add_argument("--acknowledge-flags", action="store_true")
     approve_m = sub.add_parser("approve-manifest")
     approve_m.add_argument("group")
     approve_m.add_argument("manifest")
@@ -96,7 +147,7 @@ def main(argv: Sequence[str] | None = None, *, input_fn: Callable[[str], str] = 
     args = parser.parse_args(argv)
     try:
         return _run(args, input_fn)
-    except (UsageError, ApprovalError, DisclosureNotApproved, ProviderNotConfigured) as exc:
+    except (UsageError, ApprovalError, DisclosureNotApproved, ProviderNotConfigured, ProposalError) as exc:
         print(f"error: {exc}", file=sys.stderr)  # these messages never contain paths
         return EXIT_ERROR
     except (ValueError, OSError, PrivacyConfigError) as exc:
@@ -130,6 +181,113 @@ def _confirm(prompt: str, word: str, args: argparse.Namespace, input_fn: Callabl
         return input_fn(f"{prompt}\nType '{word}' to continue: ").strip().lower() == word
     except EOFError:
         return False
+
+
+#: Replaced in tests with a fake provider factory. Never contacts anything by itself.
+make_provider = get_provider
+
+
+def _submit(args: argparse.Namespace, key: str, group, input_fn: Callable[[str], str]) -> int:
+    manifest, payload = load_manifest(key, group.id, args.manifest)
+    if manifest.provider == "dry-run":
+        raise UsageError("This is a dry-run manifest; use the dry-run command.")
+    approval = find_manifest_approval(manifest)
+    if approval is None:
+        append_audit(key, group.id, {"manifest_id": manifest.id, "provider": manifest.provider,
+                                     "model": manifest.model, "outcome": "refused", "reason": "not approved"})
+        raise DisclosureNotApproved("This disclosure manifest has not been approved.")
+    cost = manifest.request.get("cost") or {}
+    estimate = (f" Estimated cost: at most about ${cost['max_cost_usd']:.2f} (an upper bound, not an exact charge)."
+                if "max_cost_usd" in cost else " Cost: unknown for this model; check current pricing.")
+    prompt = (f"Send {manifest.payload_bytes:,} bytes to {manifest.provider} / {manifest.model} now? "
+              f"The approved excerpts will leave this computer.{estimate}")
+    if not args.yes:
+        try:
+            if input_fn(f"{prompt}\nType 'send' to continue: ").strip().lower() != "send":
+                print("Not sent.")
+                return EXIT_ERROR
+        except EOFError:
+            print("Not sent.")
+            return EXIT_ERROR
+    provider = make_provider(manifest.provider, manifest.model)
+    base = {"manifest_id": manifest.id, "provider": manifest.provider, "model": manifest.model,
+            "payload_bytes": manifest.payload_bytes, "payload_sha256": manifest.payload_sha256}
+    try:
+        result = submit(manifest, payload, approval, provider)
+    except DisclosureNotApproved as exc:
+        append_audit(key, group.id, {**base, "outcome": "refused", "reason": str(exc)})
+        raise
+    except ProviderRequestFailed as exc:
+        append_audit(key, group.id, {**base, "outcome": "failed", "reason": str(exc)})
+        raise UsageError(str(exc)) from None
+    append_audit(key, group.id, {**base, "outcome": result.status, "sent": result.sent})
+    if result.response is None:
+        print(f"The provider returned no usable answer ({result.status}). Nothing was saved.")
+        return EXIT_ERROR
+    save_response(key, group.id, manifest.id, result.response)
+    try:
+        proposal = build_proposal(response_text=result.response, sent_body=json.loads(payload), inventory_key=key,
+                                  group_id=group.id, manifest_id=manifest.id, provider=manifest.provider,
+                                  model=manifest.model)
+    except InvalidModelOutput as exc:
+        append_audit(key, group.id, {**base, "outcome": "invalid_output", "reason": str(exc)})
+        print(f"The answer did not match the required structure ({exc}). It was kept locally; nothing else saved.")
+        return EXIT_ERROR
+    save_proposal(proposal)
+    claims = proposal.all_claims()
+    verified = sum(c.status == "verified" for _, c in claims)
+    print(f"Proposal {proposal.id}: {verified} of {len(claims)} claims verified, "
+          f"{sum(n.valid for n in proposal.names)} valid name(s), {len(proposal.review_flags)} review flag(s).")
+    print("Review it with: show-proposal " + group.id + " " + proposal.id)
+    return EXIT_OK
+
+
+def _format_proposal(p, key: str, group_id: str, *, redact: bool, claims: bool) -> str:
+    claim_list = p.all_claims()
+    lines = [f"Proposal {p.id} ({p.status}; ownership: {p.ownership})",
+             f"  Provider / model: {p.provider} / {p.model}",
+             f"  Claims: {sum(c.status == 'verified' for _, c in claim_list)} verified, "
+             f"{sum(c.status == 'rejected' for _, c in claim_list)} rejected",
+             f"  Names: {sum(n.valid for n in p.names)} valid of {len(p.names)}"]
+    steps = p.usage.instructions()
+    lines.append(f"  Setup/run/test steps: {sum(i.status == 'verified' for _, i in steps)} verified, "
+                 f"{sum(i.status == 'unverified' for _, i in steps)} unverified, "
+                 f"{sum(i.status == 'rejected' for _, i in steps)} rejected")
+    if p.review_flags:
+        lines.append("  Review flags:")
+        lines += [f"    - {f}" for f in p.review_flags]
+    if redact:
+        return "\n".join(lines)
+    pack = latest_pack(key, group_id)
+    where = {i.id: i.location for i in pack.items} if pack else {}
+
+    def show(label: str, c) -> None:
+        mark = {"verified": "✓", "rejected": "✗", "your_wording": "✎"}.get(c.status, "?")
+        lines.append(f"    {mark} [{label}] {c.text}" + (f"  — rejected: {c.reason}" if c.reason else ""))
+        if claims:
+            lines.extend(f"        evidence {e}: {where.get(e, '(not in the current evidence pack)')}"
+                         for e in c.evidence_ids)
+
+    lines.append(f"  Title: {p.user_title or p.title}" + ("  (your wording)" if p.user_title else ""))
+    if p.user_summary:
+        lines.append(f"  Summary (your wording): {p.user_summary}")
+    lines.append("  Claims:")
+    for label, c in claim_list:
+        show(label, c)
+    lines.append("  Repository names:")
+    for n in p.names:
+        lines.append(f"    {'✓' if n.valid else '✗'} {n.slug}  ({n.source})"
+                     + (f"  — {'; '.join(n.problems)}" if n.problems else ""))
+    if p.uncertainties:
+        lines.append("  Uncertainties: " + "; ".join(p.uncertainties))
+    if p.attribution_concerns:
+        lines.append("  Attribution concerns: " + "; ".join(p.attribution_concerns))
+    lines.append("  Setup / run / test:")
+    for section, i in steps:
+        mark = {"verified": "✓", "unverified": "⚠", "rejected": "✗"}[i.status]
+        lines.append(f"    {mark} [{section}] {i.text}" + (f"  `{i.command}`" if i.command else "")
+                     + (f"  — {i.reason}" if i.reason else ""))
+    return "\n".join(lines)
 
 
 def _run(args: argparse.Namespace, input_fn: Callable[[str], str]) -> int:
@@ -208,11 +366,13 @@ def _run(args: argparse.Namespace, input_fn: Callable[[str], str]) -> int:
         return EXIT_OK
 
     if args.command == "manifest":
-        get_provider(args.provider, args.model)  # fails unless the provider exists
+        model = args.model or (DEFAULT_ANTHROPIC_MODEL if args.provider == "anthropic" else "dry-run")
+        get_provider(args.provider, model)  # fails unless the provider exists; contacts nothing
         pack = latest_pack(key, group.id)
         if pack is None:
             raise UsageError("No evidence pack for this group. Run extract first.")
-        manifest, payload = build_manifest(pack, args.provider, args.model)
+        manifest, payload = build_manifest(pack, args.provider, model, max_tokens=args.max_tokens,
+                                           effort=args.effort)
         save_manifest(manifest, payload)
         print(format_manifest(manifest, redact=args.redact))
         print(f"\nNothing has been sent. To approve: approve-manifest {group.id} {manifest.id}")
@@ -221,8 +381,11 @@ def _run(args: argparse.Namespace, input_fn: Callable[[str], str]) -> int:
     if args.command == "approve-manifest":
         manifest, _ = load_manifest(key, group.id, args.manifest)
         print(format_manifest(manifest, redact=args.redact))
+        external = manifest.provider != "dry-run"
         prompt = (f"\nApprove sending exactly this payload ({manifest.payload_bytes:,} bytes, SHA-256 "
-                  f"{manifest.payload_sha256[:12]}…) to {manifest.provider} / {manifest.model}?")
+                  f"{manifest.payload_sha256[:12]}…) to {manifest.provider} / {manifest.model}?"
+                  + ("\nThis provider is EXTERNAL: on submit, these excerpts leave your computer and the "
+                     "provider's data-retention policy applies." if external else ""))
         if not _confirm(prompt, "approve", args, input_fn):
             print("Not approved.")
             return EXIT_ERROR
@@ -233,6 +396,9 @@ def _run(args: argparse.Namespace, input_fn: Callable[[str], str]) -> int:
 
     if args.command == "dry-run":
         manifest, payload = load_manifest(key, group.id, args.manifest)
+        if manifest.provider != "dry-run":
+            raise UsageError("This manifest is for an external provider. The dry-run command only runs dry-run "
+                             "manifests; use 'submit' to send it after approval.")
         provider = get_provider(manifest.provider, manifest.model)
         approval = find_manifest_approval(manifest)
         try:
@@ -246,6 +412,43 @@ def _run(args: argparse.Namespace, input_fn: Callable[[str], str]) -> int:
                                      "payload_bytes": result.payload_bytes, "payload_sha256": result.payload_sha256})
         print(f"Dry run complete: {result.payload_bytes:,} bytes checked against the approved manifest.")
         print(f"  Sent to an AI provider: {'yes' if result.sent else 'no'} ({result.status})")
+        return EXIT_OK
+
+    if args.command == "submit":
+        return _submit(args, key, group, input_fn)
+    if args.command == "proposals":
+        proposals = list_proposals(key, group.id)
+        if not proposals:
+            print("No proposals yet.")
+        for p in proposals:
+            valid = sum(n.valid for n in p.names)
+            print(f"  {p.id}  {p.status}  {p.provider}/{p.model}  {valid} valid name(s), "
+                  f"{len(p.review_flags)} review flag(s)" + (f", accepted name chosen" if p.accepted_name else ""))
+        return EXIT_OK
+    if args.command == "show-proposal":
+        proposal = load_proposal(key, group.id, args.proposal)
+        print(_format_proposal(proposal, key, group.id, redact=args.redact, claims=args.claims))
+        return EXIT_OK
+    if args.command == "readme":
+        proposal = load_proposal(key, group.id, args.proposal)
+        path = save_readme(proposal)
+        if args.print_readme and not args.redact:
+            print(proposal.readme_markdown())
+        print(f"Draft README written locally: {'<data dir>/understanding/…/' + path.name if args.redact else path}")
+        print("Nothing was published. Review it before using it anywhere.")
+        return EXIT_OK
+    if args.command == "edit-proposal":
+        proposal = load_proposal(key, group.id, args.proposal)
+        edited = edit_proposal(proposal, title=args.title, summary=args.summary, add_name=args.name)
+        save_proposal(edited)
+        print(f"Proposal {edited.id} updated (your wording is labelled as yours, not as verified).")
+        return EXIT_OK
+    if args.command == "accept-proposal":
+        proposal = load_proposal(key, group.id, args.proposal)
+        accepted = accept_proposal(proposal, args.name, acknowledge_flags=args.acknowledge_flags,
+                                   taken_names=accepted_names(key, except_group=group.id))
+        save_proposal(accepted)
+        print(f"Accepted name and description for {group.id}. Nothing was created or published on GitHub.")
         return EXIT_OK
 
     # status

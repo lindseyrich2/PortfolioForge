@@ -14,6 +14,8 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# Optional: only needed to send an approved manifest to Anthropic.
+ai = ["anthropic"]
 
 [tool.hatch.version]
 path = "src/portfolioforge/__init__.py"
@@ -24,3 +26,6 @@ packages = ["src/portfolioforge"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "network: makes real network requests; skipped unless PORTFOLIOFORGE_RUN_NETWORK_TESTS=1",
+]
