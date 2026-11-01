@@ -31,10 +31,10 @@ def test_live_anthropic_round_trip_with_synthetic_evidence():
     pack = EvidencePack("p_live", "live", "g_live", "a_live", datetime.now(UTC), (item,),
                         (Technology("Python", ("e_live1",)),), ({"project_path": "fib.py"},), ())
     manifest, payload = build_manifest(pack, "anthropic", os.environ.get("PORTFOLIOFORGE_LIVE_MODEL",
-                                                                         "claude-sonnet-5-5"), max_tokens=4000,
-                                       effort="low")
+                                                                         "claude-sonnet-5-5"), max_tokens=12000,
+                                       effort="low")  # thinking counts toward max_tokens; leave room
     result = submit(manifest, payload, approve_manifest(manifest), get_provider("anthropic", manifest.model))
-    assert result.sent and result.response
+    assert result.sent and result.response, f"no usable answer: {result.status}"
     proposal = build_proposal(response_text=result.response, sent_body=json.loads(payload), inventory_key="live",
                               group_id="g_live", manifest_id=manifest.id, provider="anthropic", model=manifest.model)
     assert proposal.ownership == "unconfirmed"

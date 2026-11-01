@@ -108,6 +108,29 @@ def good_answer(pack, **overrides) -> dict:
     return answer
 
 
+def wire(answer: dict) -> dict:
+    """Convert a readable nested test answer into the flat structured-output format the API returns."""
+    claims = [{"category": "purpose", "heading": "", **answer["purpose"]},
+              {"category": "summary", "heading": "", **answer["summary"]}]
+    for key, category in (("functionality", "functionality"), ("languages", "language"),
+                          ("technologies", "technology"), ("engineering_concepts", "engineering_concept")):
+        claims += [{"category": category, "heading": "", **c} for c in answer[key]]
+    for section in answer["readme_sections"]:
+        claims += [{"category": "readme", "heading": section["heading"], **c} for c in section["items"]]
+    usage = answer["usage_guide"]
+    steps = []
+    for field, section in (("prerequisites", "prerequisite"), ("dependencies", "dependency"),
+                           ("setup_steps", "setup"), ("run_commands", "run"), ("test_instructions", "test"),
+                           ("data_and_configuration", "data_and_configuration")):
+        steps += [{"section": section, **s} for s in usage[field]]
+    return {"title": answer["title"], "claims": claims, "repository_names": answer["repository_names"],
+            "steps": steps, "compatibility_notes": usage["compatibility_notes"],
+            "uncertainties": answer["uncertainties"], "attribution_concerns": answer["attribution_concerns"],
+            "missing_information": usage["missing_information"],
+            "insufficient_evidence": answer["insufficient_evidence"],
+            "needs_local_inspection": usage["needs_local_inspection"]}
+
+
 def _anthropic_manifest(world, model="claude-opus-5-5"):
     pack, approval, _ = _pack(world)
     manifest, payload = build_manifest(pack, "anthropic", model)
@@ -133,7 +156,7 @@ def test_anthropic_payload_is_the_complete_request_body(world):
 
 def test_submit_sends_exactly_the_approved_fields(world, no_network):
     pack, manifest, payload = _anthropic_manifest(world)
-    client = FakeClient(json.dumps(good_answer(pack)))
+    client = FakeClient(json.dumps(wire(good_answer(pack))))
     result = submit(manifest, payload, approve_manifest(manifest), AnthropicProvider(manifest.model, client))
     assert client.calls == [json.loads(payload)]
     assert result.sent and result.status.startswith("completed") and result.response
@@ -302,7 +325,7 @@ def test_refusals_and_truncation_produce_no_answer(world, no_network, stop, stat
 
 def _proposal(world, answer=None, **overrides):
     pack, manifest, payload = _anthropic_manifest(world)
-    text = json.dumps(answer if answer is not None else good_answer(pack, **overrides))
+    text = json.dumps(wire(answer if answer is not None else good_answer(pack, **overrides)))
     return build_proposal(response_text=text, sent_body=json.loads(payload), inventory_key="inv",
                           group_id=manifest.group_id, manifest_id=manifest.id, provider="anthropic",
                           model=manifest.model), pack
@@ -484,7 +507,7 @@ def test_cli_end_to_end_with_mocked_anthropic(tmp_path, monkeypatch, fake_system
 
     from portfolioforge.understanding.store import latest_pack
     pack = latest_pack("20260401T000000Z", group)
-    client = FakeClient(json.dumps(good_answer(pack)))
+    client = FakeClient(json.dumps(wire(good_answer(pack))))
     monkeypatch.setattr(ucli, "make_provider", lambda name, model: AnthropicProvider(model, client))
 
     assert ucli.main(["submit", group, manifest_id, "--yes"]) == 1  # not approved yet
