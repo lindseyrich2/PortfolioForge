@@ -54,6 +54,15 @@ output/
 logs/
 *.log
 
+# --- PortfolioForge personal data: never commit (defense in depth; the tools ---
+# --- already refuse to write inside a Git repository)                        ---
+*.jsonl
+inventories/
+groupings/
+reviews/
+privacy.toml
+private-terms.txt
+
 # --- IDEs / editors ---
 .vscode/
 .idea/

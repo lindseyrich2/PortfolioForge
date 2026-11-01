@@ -158,6 +158,54 @@ OS_METADATA_FILES: frozenset[str] = frozenset({"thumbs.db", "ehthumbs.db", "desk
 OFFICE_LOCK_PREFIX = "~$"
 
 
+# --- Project markers (inventory schema v2) ------------------------------------
+#
+# Names on these fixed lists are recorded on their folder's DirectoryRecord as
+# evidence of a project root, even when the file itself is not inventoried
+# (unrecognized extension, hidden) or the folder is skipped (.git, .idea).
+# Only these exact names are ever recorded; other unrecognized files are counts.
+
+PROJECT_MARKER_FILES: frozenset[str] = frozenset(
+    {
+        # documentation and licensing
+        "readme", "readme.md", "readme.rst", "readme.txt",
+        "license", "license.md", "license.txt", "copying",
+        "contributing.md", "code_of_conduct.md", "changelog.md", "changes.md",
+        # Python
+        "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "pipfile",
+        "pipfile.lock", "poetry.lock", "environment.yml", "environment.yaml", "tox.ini",
+        # JavaScript / TypeScript
+        "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "tsconfig.json",
+        # JVM
+        "pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "gradlew", "build.xml",
+        "manifest.mf", ".classpath", ".project",
+        # C / C++ and others
+        "makefile", "cmakelists.txt", "cargo.toml", "go.mod", "gemfile",
+        # R
+        "description", "namespace", "renv.lock", ".rprofile",
+        # containers, notebooks and version control
+        "dockerfile", "docker-compose.yml", "docker-compose.yaml", ".gitignore",
+        ".gitattributes",
+    }
+)
+PROJECT_MARKER_FILE_PATTERNS: tuple[str, ...] = ("*.rproj", "*.sln", "*.csproj", "*.vcxproj", "*.fsproj")
+PROJECT_MARKER_DIRS: frozenset[str] = frozenset(
+    {".git", ".github", ".gitlab", ".idea", ".vscode", ".settings", ".devcontainer",
+     "nbproject", "renv", "packrat", ".ipynb_checkpoints"}
+)
+
+
+def is_project_marker_file(name: str) -> bool:
+    folded = name.casefold()
+    return folded in PROJECT_MARKER_FILES or any(
+        fnmatchcase(folded, pattern) for pattern in PROJECT_MARKER_FILE_PATTERNS
+    )
+
+
+def is_project_marker_dir(name: str) -> bool:
+    return name.casefold() in PROJECT_MARKER_DIRS
+
+
 def is_sensitive_name(name: str, extra_patterns: Iterable[str] = ()) -> bool:
     folded = name.casefold()
     return any(

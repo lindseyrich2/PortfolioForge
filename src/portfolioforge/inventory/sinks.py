@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import IO, Any, Iterable, Protocol
 
+from ..paths import ensure_safe_output_dir, inventories_dir
 from .models import (
     DirectoryRecord,
     FileRecord,
@@ -89,7 +90,7 @@ class JsonlSink:
     """
 
     def __init__(self, output_dir: str | os.PathLike[str]) -> None:
-        self.output_dir = Path(output_dir)
+        self.output_dir = ensure_safe_output_dir(output_dir)
         if (self.output_dir / REPORT_NAME).exists():
             raise FileExistsError(f"An inventory already exists in {self.output_dir}")
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -158,8 +159,10 @@ def load_inventory(directory: str | os.PathLike[str]) -> Inventory:
     )
 
 
+INVENTORY_FILE_NAMES = frozenset({FILES_NAME, DIRECTORIES_NAME, SKIPPED_NAME, REPORT_NAME, PLAN_NAME})
+
+
 def default_output_dir(now: datetime | None = None) -> Path:
-    """``%LOCALAPPDATA%\\PortfolioForge\\inventories\\<UTC timestamp>``, outside any repository."""
-    base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), ".local", "share")
+    """``<data dir>/inventories/<UTC timestamp>`` (see :mod:`portfolioforge.paths`)."""
     stamp = (now or datetime.now(UTC)).strftime("%Y%m%dT%H%M%SZ")
-    return Path(base) / "PortfolioForge" / "inventories" / stamp
+    return inventories_dir() / stamp

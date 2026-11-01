@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
+
+from ..privacy import DEFAULT_PRIVATE_FOLDER_NAMES, PrivacySettings
 
 DEFAULT_MAX_FILES = 1_000_000
 DEFAULT_MAX_DIRECTORIES = 2_000_000
@@ -40,6 +42,8 @@ class InventoryConfig:
 
     The protected tier (system folders, credential locations, sensitive files,
     links, cloud-only placeholders) always applies and cannot be turned off here.
+    Private folders are part of that tier; which folders count as private is set
+    by ``private_folder_names`` / ``private_paths`` (see :mod:`portfolioforge.privacy`).
     """
 
     include_images: bool = False
@@ -63,6 +67,19 @@ class InventoryConfig:
     """Absolute folder paths to skip, including everything below them."""
     extra_sensitive_patterns: tuple[str, ...] = ()
     """Additional filename glob patterns to treat as sensitive."""
+    private_folder_names: frozenset[str] = DEFAULT_PRIVATE_FOLDER_NAMES
+    """Folder names skipped entirely wherever they appear (casefolded). Their
+    names are redacted in results. Defaults to common sensitive names."""
+    private_paths: tuple[str, ...] = ()
+    """Absolute folders skipped entirely, with everything inside them."""
+
+    def with_privacy(self, settings: PrivacySettings) -> InventoryConfig:
+        """This config with the private folders from a user's privacy settings."""
+        return replace(
+            self,
+            private_folder_names=settings.private_folder_names,
+            private_paths=settings.private_paths,
+        )
 
 
 @dataclass(frozen=True, slots=True)

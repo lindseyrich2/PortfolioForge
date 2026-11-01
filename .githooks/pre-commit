@@ -1,0 +1,19 @@
+#!/bin/sh
+# PortfolioForge pre-commit privacy check.
+#
+# Enable once per clone with:  git config core.hooksPath .githooks
+#
+# Uses $PYTHON if set, otherwise the repository's .venv, otherwise python3/python.
+root="$(git rev-parse --show-toplevel)" || exit 1
+if [ -n "$PYTHON" ]; then
+    py="$PYTHON"
+elif [ -x "$root/.venv/Scripts/python.exe" ]; then
+    py="$root/.venv/Scripts/python.exe"
+elif [ -x "$root/.venv/bin/python" ]; then
+    py="$root/.venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+    py=python3
+else
+    py=python
+fi
+exec "$py" -m portfolioforge.devtools.privacy_check --root "$root"

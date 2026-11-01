@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Callable, Iterable
 
+from ..privacy import PRIVATE_PLACEHOLDER
 from . import rules, selfsource
 from .config import InventoryConfig, ResourceLimits
 from .formats import Category, lookup
@@ -144,6 +145,9 @@ class _DirState:
     file_count: int = 0
     subdirectory_count: int = 0
     categories: Counter[str] = field(default_factory=Counter)
+    marker_files: list[str] = field(default_factory=list)
+    marker_dirs: list[str] = field(default_factory=list)
+    unrecognized: Counter[str] = field(default_factory=Counter)
 
 
 _ENTER = "enter"
@@ -182,6 +186,8 @@ class _Walker:
         self._exclude_paths = tuple(normalize_path(p) for p in config.exclude_paths)
         self._exclude_names = frozenset(n.casefold() for n in config.exclude_dir_names)
         self._include_names = frozenset(n.casefold() for n in config.include_dir_names)
+        self._private_names = frozenset(n.casefold() for n in config.private_folder_names)
+        self._private_paths = tuple(normalize_path(p) for p in config.private_paths)
         source = selfsource.portfolioforge_source_dir() if config.skip_portfolioforge_source else None
         self._self_source = normalize_path(source) if source else None
 
@@ -336,11 +342,13 @@ class _Walker:
         # protected tier
         if folded in rules.CREDENTIAL_DIR_NAMES:
             return SkipReason.CREDENTIAL_LOCATION
+        child_norm = normalize_path(path)
+        if folded in self._private_names or any(is_within(child_norm, p) for p in self._private_paths):
+            return SkipReason.PRIVATE_FOLDER
         parent_norm = normalize_path(parent.abs_path)
         at_drive_top = parent_norm in self._drive_roots or os.path.dirname(parent_norm) == parent_norm
         if at_drive_top and folded in rules.PROTECTED_TOP_LEVEL_DIRS:
             return SkipReason.PROTECTED_LOCATION
-        child_norm = normalize_path(path)
         if (
             parent_norm in self._users_dirs
             and child_norm != self._profile
@@ -390,6 +398,9 @@ class _Walker:
                 file_count=state.file_count,
                 subdirectory_count=state.subdirectory_count,
                 categories=_sorted_counts(state.categories),
+                marker_files=tuple(sorted(state.marker_files, key=str.casefold)),
+                marker_dirs=tuple(sorted(state.marker_dirs, key=str.casefold)),
+                unrecognized_extensions=_sorted_counts(state.unrecognized),
             )
         )
 
@@ -423,6 +434,12 @@ class _Walker:
             if reason is None and self._limits.max_depth is not None and len(child_parts) > self._limits.max_depth:
                 reason = SkipReason.MAX_DEPTH
                 self._limits_reached.add("max_depth")
+            if reason is SkipReason.PRIVATE_FOLDER:
+                # skipped entirely: not listed, and its name is not recorded
+                self._skip(root, "/".join((*parent.parts, PRIVATE_PLACEHOLDER)), EntryKind.DIRECTORY, reason)
+                return
+            if rules.is_project_marker_dir(name):
+                parent.marker_dirs.append(name)
             if reason is not None:
                 self._skip(root, display, EntryKind.DIRECTORY, reason)
                 return
@@ -432,6 +449,8 @@ class _Walker:
 
         if not stat.S_ISREG(st.st_mode):
             return  # devices, sockets and other special files are ignored
+        if not sensitive and rules.is_project_marker_file(name):
+            parent.marker_files.append(name)
         reason = self._file_skip_reason(name, attrs, sensitive)
         if reason is SkipReason.CLOUD_ONLY:
             self._cloud_files += 1
@@ -446,6 +465,7 @@ class _Walker:
         file_format = lookup(extension) if extension else None
         if file_format is None:
             self._unrecognized[extension or "(none)"] += 1
+            parent.unrecognized[extension or "(none)"] += 1
             return
         if file_format.category is Category.IMAGE and not self._config.include_images:
             self._excluded_images += 1

@@ -11,7 +11,7 @@ and the root itself is ``""``.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import datetime
 from enum import Enum, StrEnum
 from typing import Any
@@ -19,7 +19,10 @@ from typing import Any
 from .config import ResourceLimits
 from .formats import Category
 
-SCHEMA_VERSION = 1
+#: Version 2 added project markers and unrecognized-extension counts to
+#: DirectoryRecord. Version 1 inventories still load (those fields are empty).
+SCHEMA_VERSION = 2
+SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2})
 
 
 class ScanMode(StrEnum):
@@ -46,6 +49,7 @@ class SkipReason(StrEnum):
     # protected tier
     PROTECTED_LOCATION = "protected_location"
     CREDENTIAL_LOCATION = "credential_location"
+    PRIVATE_FOLDER = "private_folder"
     SENSITIVE_NAME = "sensitive_name"
     LINK = "link"
     CLOUD_ONLY = "cloud_only"
@@ -184,10 +188,25 @@ class DirectoryRecord:
     subdirectory_count: int
     """Child folders that were traversed (skipped ones are not counted)."""
     categories: dict[str, int]
+    marker_files: tuple[str, ...] = ()
+    """Project-marker files found directly in this folder (fixed list of names only),
+    e.g. ``("README.md", "requirements.txt")``. Schema v2."""
+    marker_dirs: tuple[str, ...] = ()
+    """Project-marker subfolders, e.g. ``(".git", "nbproject")``, even if skipped. Schema v2."""
+    unrecognized_extensions: dict[str, int] = field(default_factory=dict)
+    """Counts of files directly here whose extension is not in the registry. Schema v2."""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> DirectoryRecord:
-        return cls(**{**data, "categories": dict(data["categories"])})
+        return cls(
+            **{
+                **data,
+                "categories": dict(data["categories"]),
+                "marker_files": tuple(data.get("marker_files", ())),
+                "marker_dirs": tuple(data.get("marker_dirs", ())),
+                "unrecognized_extensions": dict(data.get("unrecognized_extensions", {})),
+            }
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,7 +285,7 @@ class ScanReport:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ScanReport:
         version = data.get("schema_version")
-        if version != SCHEMA_VERSION:
+        if version not in SUPPORTED_SCHEMA_VERSIONS:
             raise ValueError(f"Unsupported inventory schema version: {version!r}")
         return cls(
             schema_version=version,

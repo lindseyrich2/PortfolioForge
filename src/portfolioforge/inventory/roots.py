@@ -11,8 +11,9 @@ import os
 import re
 import stat
 from pathlib import Path
-from typing import Iterable
+from typing import AbstractSet, Iterable
 
+from ..privacy import DEFAULT_PRIVATE_FOLDER_NAMES, PRIVATE_PLACEHOLDER
 from . import rules, selfsource
 from .config import FullScanOptions
 from .models import (
@@ -120,8 +121,30 @@ def protected_reason(
     return None
 
 
-def _validate_root(path: str, system: SystemInfo, output_dir: str | None) -> str:
+def is_private_location(
+    path: str,
+    private_paths: Iterable[str] = (),
+    private_folder_names: AbstractSet[str] = DEFAULT_PRIVATE_FOLDER_NAMES,
+) -> bool:
+    """True if ``path`` is, or is inside, a private folder (by path or by any folder name)."""
+    norm = normalize_path(path)
+    if any(is_within(norm, normalize_path(p)) for p in private_paths):
+        return True
+    names = {n.casefold() for n in private_folder_names}
+    return any(part.casefold() in names for part in Path(os.path.abspath(path)).parts)
+
+
+def _validate_root(
+    path: str,
+    system: SystemInfo,
+    output_dir: str | None,
+    private_paths: Iterable[str] = (),
+    private_folder_names: AbstractSet[str] = DEFAULT_PRIVATE_FOLDER_NAMES,
+) -> str:
     path = os.path.abspath(os.fspath(path))
+    if is_private_location(path, private_paths, private_folder_names):
+        # The path is deliberately not repeated in the message.
+        raise ProtectedLocationError("Refusing to scan a private folder (see your privacy settings).")
     if not os.path.exists(path):
         raise FileNotFoundError(f"Folder not found: {path}")
     if not os.path.isdir(path):
@@ -161,7 +184,17 @@ def _plan(
     output_dir: str | os.PathLike[str] | None,
     exclude_paths: Iterable[str | os.PathLike[str]] = (),
     drop_self_source_roots: bool = False,
+    private_paths: Iterable[str] = (),
+    private_folder_names: AbstractSet[str] = DEFAULT_PRIVATE_FOLDER_NAMES,
 ) -> ScanPlan:
+    private_paths = tuple(private_paths)
+    private_roots = [r for r in roots if is_private_location(r.path, private_paths, private_folder_names)]
+    if private_roots:
+        roots = [r for r in roots if r not in private_roots]
+        excluded = [
+            *excluded,
+            *(PlanExclusion(PRIVATE_PLACEHOLDER, SkipReason.PRIVATE_FOLDER) for _ in private_roots),
+        ]
     user_excluded = [os.path.abspath(os.fspath(p)) for p in exclude_paths]
     excluded = [*excluded, *(PlanExclusion(p, SkipReason.USER_EXCLUDED) for p in user_excluded)]
     excluded_norms = [normalize_path(p) for p in user_excluded]
@@ -213,21 +246,28 @@ def plan_targeted(
     system: SystemInfo | None = None,
     output_dir: str | os.PathLike[str] | None = None,
     exclude_paths: Iterable[str | os.PathLike[str]] = (),
+    private_paths: Iterable[str] = (),
+    private_folder_names: AbstractSet[str] = DEFAULT_PRIVATE_FOLDER_NAMES,
 ) -> ScanPlan:
     """Plan a scan of explicitly selected folders.
 
     Roots inside ``exclude_paths`` are dropped; pass the same paths to
     ``InventoryConfig.exclude_paths`` to also skip them inside other roots.
+    A root that is, or is inside, a private folder is refused.
     """
     system = system or detect_system()
     out = os.fspath(output_dir) if output_dir else None
+    private_paths = tuple(private_paths)
     roots = []
     for raw in paths:
-        path = _validate_root(os.fspath(raw), system, out)
+        path = _validate_root(os.fspath(raw), system, out, private_paths, private_folder_names)
         roots.append(_make_root(path, RootOrigin.USER_SELECTED, path))
     if not roots:
         raise ValueError("A targeted scan needs at least one folder.")
-    return _plan(ScanMode.TARGETED, roots, [], [], system, output_dir, exclude_paths)
+    return _plan(
+        ScanMode.TARGETED, roots, [], [], system, output_dir, exclude_paths,
+        private_paths=private_paths, private_folder_names=private_folder_names,
+    )
 
 
 # --- full-computer plans ---------------------------------------------------------
@@ -239,6 +279,8 @@ def plan_full_computer(
     system: SystemInfo | None = None,
     output_dir: str | os.PathLike[str] | None = None,
     exclude_paths: Iterable[str | os.PathLike[str]] = (),
+    private_paths: Iterable[str] = (),
+    private_folder_names: AbstractSet[str] = DEFAULT_PRIVATE_FOLDER_NAMES,
 ) -> ScanPlan:
     """Plan a scan of the user's files across this computer.
 
@@ -296,9 +338,14 @@ def plan_full_computer(
     if unknown := requested - seen_letters:
         raise ValueError(f"Drive not found: {', '.join(sorted(unknown))}")
 
+    private_paths = tuple(private_paths)
+    optional = [o for o in optional if not is_private_location(o.path, private_paths, private_folder_names)]
     optional_by_path = {normalize_path(o.path): o for o in optional if o.kind != "additional_drive"}
     for raw in options.include_locations:
-        path = _validate_root(os.fspath(raw), system, os.fspath(output_dir) if output_dir else None)
+        path = _validate_root(
+            os.fspath(raw), system, os.fspath(output_dir) if output_dir else None,
+            private_paths, private_folder_names,
+        )
         match = optional_by_path.pop(normalize_path(path), None)
         if match is not None:
             optional.remove(match)
@@ -309,6 +356,7 @@ def plan_full_computer(
     return _plan(
         ScanMode.FULL_COMPUTER, roots, excluded, optional, system, output_dir, exclude_paths,
         drop_self_source_roots=True,
+        private_paths=private_paths, private_folder_names=private_folder_names,
     )
 
 
