@@ -10,10 +10,13 @@ Status: **approved design, mostly implemented.**
   - name suggestions with GitHub-name rules
   - a draft README with setup, run and test instructions
   - local proposal review: edit and accept, with a local check that a chosen name isn't already in use
+  - local build-and-run inspection, with a separate approval for build files and pluggable inspectors (Java only so far)
+  - optional local validation on a temporary copy (see below)
 - **Not implemented:**
   - provenance records and `PROVENANCE.md`
   - checking your existing GitHub repository names for collisions (opt-in)
-  - local run/test validation (see below)
+  - sandboxed validation (see below)
+  - a publisher, which must block on unresolved inspection findings
   - publishing
 
 Nothing is sent to a provider without both approvals and a final typed confirmation. Nothing is published.
@@ -140,13 +143,18 @@ Every step is verified locally:
 
 The README always states that the instructions haven't been run, and that the original code is unchanged. Legacy projects are never upgraded or modified; modern alternatives are suggestions only.
 
-## Future: optional local validation of run/test instructions (approved requirement, not implemented)
+## Local build-and-run inspection and validation (implemented)
 
-A separate, explicitly approved step will check whether the documented run and test instructions actually work, without executing untrusted code automatically. Planned constraints:
-- **Its own approval gate per project,** showing the exact commands to be run.
-- **Execution only in an isolated, disposable copy,** never the original files, inside a sandbox with no network access, resource and time limits, and no access to personal folders.
-- **No automatic execution:** the user confirms each run.
-- **Recorded results** (exit codes, durations, summarized output, all redacted), so README claims such as "tests pass" can be backed by a recorded, user-approved run rather than by the model.
+**Inspector interface.** The approvals, reading, privacy scan, validation gates and README are language-agnostic. A `ProjectInspector` in the `inspectors` registry supplies what is specific to a project type: build-file names, parsing, supported commands, allowed tools, path checks and extra sensitive-data rules. Inspectors never open files or start processes, and the core rechecks their answers. Java is the only one registered.
+
+**No inspector** means "manual review needed": no commands, no validation plans and no assumptions, while the generic privacy scan still applies and the proposal gets a review flag.
+
+**Validation as built:**
+- **Its own approval per plan,** showing the exact commands. Approvals are typed, single-use and specific to one action.
+- **A disposable copy of the approved sources,** never the originals, with a reduced environment, no shell, no input, a time limit and capped output.
+- **No automatic execution,** and **recorded results** (exit codes, durations, redacted output).
+
+**Difference from the original requirement: this is not a sandbox.** The requirement called for no network access and no access to personal folders. Python's standard library can't enforce that on Windows, and Java's security manager is gone from current JDKs. So a `run` has the user's permissions, and the approval prompt says so. Real isolation, such as a container, remains future work.
 
 ## Collisions
 

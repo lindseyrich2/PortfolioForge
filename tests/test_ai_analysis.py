@@ -429,11 +429,10 @@ def test_usage_guide_is_verified_and_labelled(world):
     assert "additional approved local inspection" in flags and "unverified" in flags
 
     readme = proposal.readme_markdown()
-    for heading in ("## Requirements", "## Setup", "## Running", "## Testing", "## Data and configuration",
-                    "## Compatibility notes", "## Missing information"):
+    for heading in ("## Prerequisites", "## Setup", "## Running", "## Testing", "## Compatibility and limitations"):
         assert heading in readme
-    assert "python train.py" in readme and "✓ Run the training script." in readme
-    assert "⚠ Unverified suggestion: Run the pipeline." in readme and "**Legend:**" in readme
+    assert "python train.py" in readme and "Run the training script." in readme
+    assert "Run the pipeline." not in readme  # one primary command, not every suggestion
     assert "To run it as it was written, use the original requirements" in readme
     assert "flask" not in readme and "All tests pass" not in readme and secret not in readme
     assert "Suggested modern alternative (not applied to the original code)" in readme
@@ -447,7 +446,7 @@ def test_running_and_testing_are_marked_undetermined_when_missing(world):
     proposal, _ = _proposal(world, usage_guide={**guide, "needs_local_inspection": True})
     readme = proposal.readme_markdown()
     assert readme.count("Not determined from the available evidence") == 2
-    assert "approved local inspection" in readme
+    assert "How to run or test this project has not been determined" in readme
     assert {"no verified run instructions", "no test instructions"} <= set(proposal.review_flags)
 
 

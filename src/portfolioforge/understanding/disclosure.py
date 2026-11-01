@@ -127,7 +127,8 @@ def build_payload(pack: EvidencePack) -> bytes:
 
 
 def build_manifest(pack: EvidencePack, provider: str, model: str, now: datetime | None = None, *,
-                   max_tokens: int | None = None, effort: str | None = None) -> tuple[DisclosureManifest, bytes]:
+                   max_tokens: int | None = None, effort: str | None = None,
+                   also_not_sent: tuple[str, ...] = ()) -> tuple[DisclosureManifest, bytes]:
     """The manifest and the exact bytes that would be sent.
 
     For the dry-run provider the payload is the evidence document. For Anthropic it
@@ -162,7 +163,7 @@ def build_manifest(pack: EvidencePack, provider: str, model: str, now: datetime 
         for i in pack.items if i.id in sent_ids
     )
     dropped = len(pack.items) - len(items)
-    not_sent = list(NOT_SENT)
+    not_sent = [*NOT_SENT, *also_not_sent]
     if dropped:
         not_sent.append(f"{dropped} evidence item(s) beyond the {MAX_PAYLOAD_BYTES:,}-byte payload limit")
     digest = hashlib.sha256(payload).hexdigest()

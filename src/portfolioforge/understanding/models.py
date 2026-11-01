@@ -242,3 +242,309 @@ def manifest_from_dict(d: dict[str, Any]) -> DisclosureManifest:
 
 def manifest_approval_from_dict(d: dict[str, Any]) -> ManifestApproval:
     return ManifestApproval(**{**d, "approved_at": datetime.fromisoformat(d["approved_at"])})
+
+
+# --- local build-and-run inspection -------------------------------------------------------
+#
+# Build configuration has its own approval record (a FileApprovalRecord with
+# BUILD_APPROVAL_SCOPE, stored under a different file name), so Gate 1 and the evidence
+# pack can never pick it up. Executing anything needs a separate, single-use approval.
+
+BUILD_APPROVAL_SCOPE = "read_build_configuration_locally"
+INSPECTION_SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True, slots=True)
+class BuildFileCandidate:
+    file_id: str
+    project_path: str
+    role: str
+    size_bytes: int
+    absolute_path: str
+    modified_at: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class BuildFileProposal:
+    group_id: str
+    candidates: tuple[BuildFileCandidate, ...]
+    blocked: tuple[ExcludedFile, ...]
+    """Recognized names that exist but may not be read (links, cloud-only, too large)."""
+    review_only: tuple[str, ...]
+    """Configuration files that often hold credentials. Seen by name only; never offered or read."""
+    present: tuple[str, ...]
+    """Which of the inspector's presence checks exist. Seen by name only."""
+    notes: tuple[str, ...]
+    inspector: str | None = None
+    """The inspector chosen for this project, or None when manual review is needed."""
+
+
+@dataclass(frozen=True, slots=True)
+class SourceRef:
+    project_path: str
+    line: int | None
+    detail: str
+
+    @property
+    def location(self) -> str:
+        return f"{self.project_path} line {self.line}" if self.line else self.project_path
+
+
+@dataclass(frozen=True, slots=True)
+class EntryPoint:
+    name: str
+    status: str
+    """confirmed (declared and seen in source) | source_only (seen in source) |
+    declared_only (a build file names it, but it was not seen in an inspected source)."""
+    found_in_source: bool
+    source: SourceRef | None
+    declared_by: tuple[SourceRef, ...] = ()
+    note: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PackageInfo:
+    name: str
+    """Empty for the default package."""
+    files: int
+    location_matches: bool
+    """Whether every file sits in the folder its package declaration requires."""
+
+
+@dataclass(frozen=True, slots=True)
+class ToolRequirement:
+    setting: str
+    value: str
+    source: SourceRef
+
+
+@dataclass(frozen=True, slots=True)
+class CommandFinding:
+    purpose: str
+    """compile | package | run | test"""
+    command: str
+    status: str
+    """supported (the inspected files back it) | guess (they do not). Neither means it was run."""
+    basis: str
+    """build_file | source_structure | none"""
+    evidence: tuple[SourceRef, ...]
+    reason: str
+    working_dir: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class SensitiveFinding:
+    kind: str
+    confidence: str
+    """high | medium | low"""
+    project_path: str
+    line: int | None
+    detail: str
+    """Describes the rule. Never contains the matched value."""
+
+
+@dataclass(frozen=True, slots=True)
+class RiskSignal:
+    kind: str
+    project_path: str
+    line: int | None
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class BuildInspection:
+    id: str
+    inventory_key: str
+    group_id: str
+    created_at: datetime
+    source_approval_id: str | None
+    build_approval_id: str | None
+    inspector: str | None
+    """Which inspector ran. None means no inspector supports this project type."""
+    manual_review_reason: str | None
+    """Set when no inspector applied: nothing below says how to build or run the project."""
+    build_systems: tuple[str, ...]
+    files: tuple[dict[str, Any], ...]
+    """Per approved file: project path, what it was approved under, status."""
+    entry_points: tuple[EntryPoint, ...]
+    packages: tuple[PackageInfo, ...]
+    source_roots: tuple[str, ...]
+    test_roots: tuple[str, ...]
+    options: dict[str, str]
+    """Checked values the inspector needs again to build validation commands."""
+    requirements: tuple[ToolRequirement, ...]
+    dependencies: tuple[SourceRef, ...]
+    commands: tuple[CommandFinding, ...]
+    sensitive: tuple[SensitiveFinding, ...]
+    risks: tuple[RiskSignal, ...]
+    not_inspected: tuple[str, ...]
+    """Which project files this inspection did not read. A clean scan says nothing about them."""
+    notes: tuple[str, ...]
+    schema_version: int = INSPECTION_SCHEMA_VERSION
+
+    def commands_for(self, purpose: str, status: str | None = None) -> tuple[CommandFinding, ...]:
+        return tuple(c for c in self.commands if c.purpose == purpose and (status is None or c.status == status))
+
+
+@dataclass(frozen=True, slots=True)
+class PlannedFile:
+    file_id: str
+    project_path: str
+    sha256: str
+    size_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationPlan:
+    id: str
+    inventory_key: str
+    group_id: str
+    inspection_id: str
+    source_approval_id: str
+    inspector: str
+    action: str
+    """compile | run. Approving one never authorizes the other."""
+    entry_point: str | None
+    options: dict[str, str]
+    files: tuple[PlannedFile, ...]
+    commands: tuple[tuple[str, ...], ...]
+    timeout_seconds: int
+    warnings: tuple[str, ...]
+    runs_project_code: bool
+    created_at: datetime
+    plan_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationApproval:
+    id: str
+    plan_id: str
+    plan_sha256: str
+    action: str
+    approved_at: datetime
+    used_at: datetime | None = None
+    """Each approval allows one execution."""
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationStep:
+    label: str
+    command: tuple[str, ...]
+    exit_code: int | None
+    timed_out: bool
+    duration_seconds: float
+    stdout: str
+    """Redacted, truncated excerpt."""
+    stderr: str
+    redactions: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationResult:
+    id: str
+    plan_id: str
+    inspection_id: str
+    inventory_key: str
+    group_id: str
+    action: str
+    entry_point: str | None
+    outcome: str
+    """compile_passed | compile_failed | compile_timed_out | run_exit_zero | run_nonzero |
+    run_timed_out | tool_missing"""
+    tool_versions: dict[str, str]
+    steps: tuple[ValidationStep, ...]
+    notes: tuple[str, ...]
+    copy_removed: bool
+    finished_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class LocalFindings:
+    """What a proposal took from a local inspection. Rendered into the draft README."""
+
+    inspection_id: str
+    applied_at: datetime
+    entry_points: tuple[EntryPoint, ...]
+    requirements: tuple[ToolRequirement, ...]
+    commands: tuple[CommandFinding, ...]
+    validations: tuple[ValidationResult, ...] = ()
+    resolved_flags: tuple[str, ...] = ()
+    """Review flags this inspection settled; restored if another inspection replaces it."""
+    added_flags: tuple[str, ...] = ()
+    """Review flags this inspection raised; replaced if another inspection replaces it."""
+    manual_review_reason: str | None = None
+
+
+def _ref(d: dict[str, Any] | None) -> SourceRef | None:
+    return SourceRef(**d) if d else None
+
+
+def _entry(d: dict[str, Any]) -> EntryPoint:
+    return EntryPoint(**{**d, "source": _ref(d["source"]),
+                         "declared_by": tuple(SourceRef(**r) for r in d["declared_by"])})
+
+
+def _requirement(d: dict[str, Any]) -> ToolRequirement:
+    return ToolRequirement(d["setting"], d["value"], SourceRef(**d["source"]))
+
+
+def _command(d: dict[str, Any]) -> CommandFinding:
+    return CommandFinding(**{**d, "evidence": tuple(SourceRef(**r) for r in d["evidence"])})
+
+
+def inspection_from_dict(d: dict[str, Any]) -> BuildInspection:
+    if d.get("schema_version") != INSPECTION_SCHEMA_VERSION:
+        raise ValueError("Unsupported build inspection version.")
+    return BuildInspection(**{
+        **d, "created_at": datetime.fromisoformat(d["created_at"]),
+        "build_systems": tuple(d["build_systems"]), "files": tuple(dict(f) for f in d["files"]),
+        "entry_points": tuple(_entry(e) for e in d["entry_points"]),
+        "packages": tuple(PackageInfo(**p) for p in d["packages"]),
+        "source_roots": tuple(d["source_roots"]), "test_roots": tuple(d["test_roots"]),
+        "options": dict(d["options"]),
+        "requirements": tuple(_requirement(r) for r in d["requirements"]),
+        "dependencies": tuple(SourceRef(**r) for r in d["dependencies"]),
+        "commands": tuple(_command(c) for c in d["commands"]),
+        "sensitive": tuple(SensitiveFinding(**s) for s in d["sensitive"]),
+        "risks": tuple(RiskSignal(**r) for r in d["risks"]),
+        "not_inspected": tuple(d["not_inspected"]), "notes": tuple(d["notes"]),
+    })
+
+
+def validation_plan_from_dict(d: dict[str, Any]) -> ValidationPlan:
+    return ValidationPlan(**{
+        **d, "files": tuple(PlannedFile(**f) for f in d["files"]), "options": dict(d["options"]),
+        "commands": tuple(tuple(c) for c in d["commands"]), "warnings": tuple(d["warnings"]),
+        "created_at": datetime.fromisoformat(d["created_at"]),
+    })
+
+
+def validation_approval_from_dict(d: dict[str, Any]) -> ValidationApproval:
+    return ValidationApproval(**{
+        **d, "approved_at": datetime.fromisoformat(d["approved_at"]),
+        "used_at": datetime.fromisoformat(d["used_at"]) if d.get("used_at") else None,
+    })
+
+
+def validation_result_from_dict(d: dict[str, Any]) -> ValidationResult:
+    return ValidationResult(**{
+        **d, "tool_versions": dict(d["tool_versions"]), "notes": tuple(d["notes"]),
+        "steps": tuple(ValidationStep(**{**s, "command": tuple(s["command"]), "redactions": dict(s["redactions"])})
+                       for s in d["steps"]),
+        "finished_at": datetime.fromisoformat(d["finished_at"]),
+    })
+
+
+def local_findings_from_dict(d: dict[str, Any] | None) -> LocalFindings | None:
+    if not d:
+        return None
+    return LocalFindings(
+        inspection_id=d["inspection_id"], applied_at=datetime.fromisoformat(d["applied_at"]),
+        entry_points=tuple(_entry(e) for e in d["entry_points"]),
+        requirements=tuple(_requirement(r) for r in d["requirements"]),
+        commands=tuple(_command(c) for c in d["commands"]),
+        validations=tuple(validation_result_from_dict(v) for v in d.get("validations", ())),
+        resolved_flags=tuple(d.get("resolved_flags", ())),
+        added_flags=tuple(d.get("added_flags", ())),
+        manual_review_reason=d.get("manual_review_reason"),
+    )
