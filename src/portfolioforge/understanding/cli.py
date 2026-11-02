@@ -10,8 +10,8 @@
                                             separate approval to read those files on this computer
     inspect GROUP                           work out how to build and run; flag sensitive data (runs nothing)
     show-inspection GROUP                   the latest findings; flagged values are never shown
-    plan-validation GROUP --action {compile,run} [--entry NAME] [--timeout S]
-                                            show the exact commands a local validation would run
+    plan-validation GROUP [--action {compile,run,test}] [--entry NAME] [--timeout S]
+                                            compile, run and test status, and the exact commands that would run
     approve-validation GROUP PLAN           approve that exact plan for one execution (always asks you to type)
     validate GROUP PLAN                     run an approved plan on a temporary copy
     apply-inspection GROUP PROPOSAL         add local findings to a proposal and its README (nothing is sent)
@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from collections import Counter
 from dataclasses import replace
@@ -71,6 +72,7 @@ from .eligibility import assess_run
 from .extract import build_evidence_pack, evidence_summary
 from .findings import NOT_SENT_WITH_FINDINGS, apply_inspection, build_augmented_pack
 from .inspection import inspect_project
+from .inspectors import DEFAULT_REGISTRY
 from .models import BuildInspection, EligibilityStatus, ValidationResult
 from .reader import ApprovedFileReader
 from .selection import ApprovalError, approve_files, propose_selection
@@ -114,6 +116,7 @@ from .validation import (
     execute_plan,
     format_plan,
     run_bounded,
+    validation_status,
 )
 
 EXIT_OK = 0
@@ -159,7 +162,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("show-inspection", help="the latest inspection findings").add_argument("group")
     plan = sub.add_parser("plan-validation", help="show the exact commands a validation would run; runs nothing")
     plan.add_argument("group")
-    plan.add_argument("--action", required=True, choices=ACTIONS)
+    plan.add_argument("--action", choices=ACTIONS, help="default: every check this project type offers")
     plan.add_argument("--entry", metavar="NAME", help="entry point to run, when there is more than one")
     plan.add_argument("--timeout", type=int, metavar="SECONDS")
     # Deliberately no --yes: permission to run a project's code is always typed by a person.
@@ -593,11 +596,34 @@ def _run(args: argparse.Namespace, input_fn: Callable[[str], str]) -> int:
         approval = latest_file_approval(key, group.id)
         if inspection is None or approval is None:
             raise UsageError("Run approve-files and inspect first.")
-        plan = build_plan(inspection=inspection, source_approval=approval, reader=ApprovedFileReader(approval, privacy),
-                          action=args.action, entry_point=args.entry, timeout_seconds=args.timeout)
-        save_validation_plan(plan)
-        print(format_plan(plan, redact_names=args.redact))
-        print(f"\nNothing was run. To approve this exact plan: approve-validation {group.id} {plan.id}")
+        print("Validation status:")
+        for action, state in validation_status(inspection, list_validation_results(key, group.id)).items():
+            print(f"  {action}: {state}")
+        inspector = DEFAULT_REGISTRY.get(inspection.inspector)
+        if args.action:
+            actions = [args.action]
+        elif inspector is None:
+            print(f"Validation is unavailable. {inspection.manual_review_reason}")
+            return EXIT_OK
+        else:
+            actions = list(inspector.validation_actions())
+        for action in actions:
+            try:
+                plan = build_plan(inspection=inspection, source_approval=approval,
+                                  reader=ApprovedFileReader(approval, privacy), action=action, entry_point=args.entry,
+                                  timeout_seconds=args.timeout)
+            except ValidationUnavailable as exc:
+                if args.action:
+                    raise
+                print(f"\nNo {action} plan: {exc}")
+                continue
+            save_validation_plan(plan)
+            print()
+            print(format_plan(plan, redact_names=args.redact))
+            tools = sorted({c[0] for c in plan.commands})
+            print("  Tools on this computer: " + ", ".join(
+                f"{t} {'found' if shutil.which(t) else 'NOT FOUND'}" for t in tools))
+            print(f"  Nothing was run. To approve this exact plan: approve-validation {group.id} {plan.id}")
         return EXIT_OK
 
     if args.command == "approve-validation":

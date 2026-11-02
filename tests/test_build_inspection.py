@@ -84,6 +84,7 @@ from portfolioforge.understanding.validation import (
     CommandOutcome,
     _minimal_environment,
     run_bounded,
+    validation_status,
 )
 
 JAVA = JavaInspector()
@@ -1138,6 +1139,21 @@ def test_sensitive_flags_block_accepting_until_acknowledged(tmp_path, fake_syste
     assert accept_proposal(updated, "shelf-tracker", acknowledge_flags=True, taken_names=set()).status == "accepted"
 
 
+def test_accepted_proposal_takes_new_results_for_its_own_inspection_only(world):
+    result = run_inspection(world)
+    plan = plan_for(result, "compile")
+    validation = execute_plan(plan, approve_plan(plan), result.source_reader, runner=FakeRunner(), which=_which)
+    applied = apply_inspection(proposal_for(world.group.id), result.inspection)
+    accepted = replace(applied, status="accepted", accepted_name="shelf-tracker")
+    updated = apply_inspection(accepted, result.inspection, (validation,))
+    assert updated.status == "accepted" and updated.accepted_name == "shelf-tracker"
+    assert updated.review_flags == accepted.review_flags and updated.edits == accepted.edits
+    assert "compiled (exit code 0)" in updated.readme_markdown()
+    other = run_inspection(world).inspection
+    with pytest.raises(Exception, match="already accepted"):
+        apply_inspection(accepted, other, (validation,))
+
+
 def test_accepted_proposals_cannot_be_changed_by_findings(world):
     accepted = replace(proposal_for(world.group.id), status="accepted")
     with pytest.raises(Exception, match="already accepted"):
@@ -1792,3 +1808,101 @@ def test_readme_layout_works_without_any_inspection_for_any_language():
     headings = _headings(readme)
     assert headings[0] == "Overview" and "Running" in headings and len(headings) == len(set(headings))
     assert "- Open the notebook." in readme.split("## Running")[1]
+
+
+# --- validation as a standard step ------------------------------------------------------------------
+
+
+def test_status_for_java_says_what_is_known(world):
+    result = run_inspection(world)
+    status = validation_status(result.inspection, ())
+    assert status["compile"].startswith("not run yet") and status["run"].startswith("not run yet")
+    assert status["test"].startswith("unavailable")
+    plan = plan_for(result, "compile")
+    passed = execute_plan(plan, approve_plan(plan), result.source_reader, runner=FakeRunner(), which=_which)
+    assert validation_status(result.inspection, (passed,))["compile"] == "succeeded (compile_passed)"
+    failed = execute_plan(plan, approve_plan(plan), result.source_reader, runner=FakeRunner(exit_codes=(1,)), which=_which)
+    assert validation_status(result.inspection, (failed,))["compile"] == "failed (compile_failed)"
+    missing = execute_plan(plan, approve_plan(plan), result.source_reader, runner=FakeRunner(), which=lambda n: None)
+    assert validation_status(result.inspection, (missing,))["compile"].startswith("could not run")
+    stale = replace(passed, inspection_id="bi_other")
+    assert validation_status(result.inspection, (stale,))["compile"].startswith("not run yet")
+
+
+def test_status_without_an_inspector_is_unavailable_not_a_guess(unsupported):
+    status = validation_status(run_inspection(unsupported, build=False).inspection, ())
+    assert all(state.startswith("unavailable: manual review") for state in status.values()) and set(status) == {"compile", "run", "test"}
+
+
+class TestingInspector(ToyInspector):
+    def validation_actions(self):
+        return ("test",)
+
+    def stage_of(self, command):
+        return "test"
+
+    def needs_entry_point(self, action):
+        return False
+
+    def build_commands(self, action, files, entry_point, options):
+        return (("toytool", "test"),)
+
+
+def test_an_inspector_can_offer_a_test_check_without_core_changes(tmp_path, fake_system):
+    t = toy_world(tmp_path, fake_system)
+    t.registry = InspectorRegistry([TestingInspector()])
+    t.inspection = replace(t.inspection, inspector=TestingInspector.name)
+    reader = ApprovedFileReader(t.source, t.w.privacy)
+    plan = build_plan(inspection=t.inspection, source_approval=t.source, reader=reader, action="test", registry=t.registry)
+    assert any("NOT A SANDBOX" in w for w in plan.warnings)  # tests run project code
+
+    def check(codes):
+        return execute_plan(plan, approve_plan(plan), reader, runner=FakeRunner(exit_codes=codes), which=lambda n: f"/fake/{n}",
+                            registry=t.registry)
+
+    assert check((0,)).outcome == "test_passed" and check((1,)).outcome == "test_failed"
+    assert validation_status(t.inspection, (check((0,)),), t.registry)["test"] == "succeeded (test_passed)"
+    readme = apply_inspection(proposal_for(t.w.group.id), t.inspection, (check((1,)),)).readme_markdown()
+    assert "the test command exited with a non-zero code" in readme
+
+
+def test_plan_validation_prepares_every_offered_plan_and_runs_nothing(cli, monkeypatch):
+    _prepared(cli)
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("something tried to start a process")
+
+    monkeypatch.setattr(subprocess, "Popen", refuse)
+    monkeypatch.setattr(subprocess, "run", refuse)
+    code, out, _ = cli.run("plan-validation", cli.group)
+    assert code == 0 and "compile: not run yet" in out and "test: unavailable" in out
+    assert "(compile)" in out and "(run)" in out and "Tools on this computer: javac" in out
+    assert len(list(cli.folder.glob("validation-plan-*"))) == 2
+    assert not list(cli.folder.glob("validation-approval-*")) and not list(cli.folder.glob("validation-result-*"))
+    assert not (cli.tmp / "EXECUTED.txt").exists()
+
+
+def test_plan_validation_for_a_single_action_and_an_unoffered_one(cli):
+    _prepared(cli)
+    code, out, _ = cli.run("plan-validation", cli.group, "--action", "compile")
+    assert code == 0 and "(compile)" in out and "(run)" not in out
+    code, _, err = cli.run("plan-validation", cli.group, "--action", "test")
+    assert code == 1 and "does not offer" in err
+
+
+def test_plan_validation_without_an_inspector_marks_it_unavailable(tmp_path, monkeypatch, fake_system, capsys):
+    monkeypatch.setenv(paths.DATA_DIR_ENV, str(tmp_path / "pf-data"))
+    root = make_tree(tmp_path / "Synthetic", {"Work/SortLab/main.py": "print(1)\n", "Work/SortLab/README.md": "# S\n",
+                                              "Work/Other/x.py": "print(1)\n"})
+    key = "20260301T000000Z"
+    with JsonlSink(paths.inventories_dir() / key) as sink:
+        run_scan(plan_targeted([root], system=fake_system), sink=sink)
+    assert gcli.main(["propose"]) == 0
+    group = next(g.id for g in load_run(key).groups if g.working_title.text == "SortLab")
+    assert gcli.main(["accept", group]) == 0
+    assert ucli.main(["approve-files", group, "--yes", "--acknowledge-review"]) == 0
+    assert ucli.main(["inspect", group]) == 0
+    capsys.readouterr()
+    assert ucli.main(["plan-validation", group]) == 0
+    out = capsys.readouterr().out
+    assert "unavailable: manual review needed" in out and "Validation plan" not in out and "javac" not in out

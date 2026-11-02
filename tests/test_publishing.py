@@ -26,7 +26,7 @@ from portfolioforge.publishing import cli as pcli
 from portfolioforge.publishing import workflow as wf
 from portfolioforge.understanding.analysis import accept_proposal
 from portfolioforge.understanding.models import CommandFinding, LocalFindings, ValidationResult, ValidationStep
-from portfolioforge.understanding.store import save_proposal
+from portfolioforge.understanding.store import load_proposal, save_proposal
 from test_build_inspection import (
     FAKE_EMAIL,
     FAKE_PASSWORD,
@@ -39,7 +39,7 @@ from test_build_inspection import (
 )
 
 KEY = "20260301T000000Z"
-DECLARED = ("--ownership", "mine", "--course-policy", "not-coursework", "--license", "none")
+DECLARED = ("--ownership", "mine", "--license", "none")
 SOURCES = ("src/com/example/shelf/ShelfApp.java", "src/com/example/shelf/Shelf.java")
 
 
@@ -240,11 +240,10 @@ def _check_kinds(pub, stage_id):
 
 
 @pytest.mark.parametrize("missing, kind", [
-    (("--course-policy", "not-coursework", "--license", "none"), "unconfirmed_ownership"),
-    (("--ownership", "mine", "--license", "none"), "unconfirmed_course_policy"),
-    (("--ownership", "mine", "--course-policy", "not-coursework"), "license_not_chosen"),
-    (("--ownership", "team", "--course-policy", "not-coursework", "--license", "none"), "attribution_missing"),
-    (("--ownership", "mine", "--course-policy", "not-coursework", "--license", "MIT"), "license_file_missing"),
+    (("--license", "none"), "unconfirmed_ownership"),
+    (("--ownership", "mine"), "license_not_chosen"),
+    (("--ownership", "team", "--license", "none"), "attribution_missing"),
+    (("--ownership", "mine", "--license", "MIT"), "license_file_missing"),
 ])
 def test_undeclared_ownership_and_licensing_block(pub, missing, kind):
     stage_id = pub.stage(extra=missing)
@@ -598,25 +597,25 @@ def test_provenance_separates_a_supported_command_from_what_actually_ran(pub):
     found = LocalFindings("bi", datetime(2026, 2, 3, tzinfo=UTC), (), (), (command,),
                           validations=(_check("compile", "compile_passed", "direct-tool"),))
     text = wf.provenance_markdown(replace(pub.proposal, local_findings=found), [], "private", "mine",
-                                  "publishing-permitted", "none", None)
+                                  True, "none", None)
     assert "Run command in the README (`buildtool run`): supported by the project's files, but this command was " \
            "**not executed**" in text
     assert "Local compile check: executed `direct-tool` (direct-tool 1.0)" in text and "`compile_passed`" in text
-    assert "Local run check: **not executed**" in text and "Tests: **not executed**" in text
-    assert "coursework; the publisher states the course allows publishing it" in text
+    assert "Local run check: **not executed**" in text and "Local test check: **not executed**" in text
+    assert "Historical context: originally created as coursework" in text
     assert "not part of the original project" in text
 
 
 def test_provenance_does_not_count_a_check_that_could_not_start(pub):
     missing = replace(_check("compile", "tool_missing", "x"), steps=())
     found = LocalFindings("bi", datetime(2026, 2, 3, tzinfo=UTC), (), (), (), validations=(missing,))
-    text = wf.provenance_markdown(replace(pub.proposal, local_findings=found), [], "private", "mine", None, None, None)
-    assert "Local compile check: **not executed**" in text and "Origin: not confirmed" in text
+    text = wf.provenance_markdown(replace(pub.proposal, local_findings=found), [], "private", "mine", False, None, None)
+    assert "Local compile check: **not executed**. A required tool was missing." in text and "coursework" not in text
 
 
 def test_provenance_with_no_findings_claims_nothing(pub):
-    text = wf.provenance_markdown(pub.proposal, [], "private", "mine", "not-coursework", "none", None)
-    assert "None identified" in text and "no command is confirmed" in text and "Tests: **not executed**" in text
+    text = wf.provenance_markdown(pub.proposal, [], "private", "mine", False, "none", None)
+    assert "None identified" in text and "no command is confirmed" in text and "Local test check: **not executed**" in text
 
 
 # --- review of the safety properties ------------------------------------------------------------------
@@ -716,7 +715,7 @@ def test_global_attributes_cannot_change_the_committed_bytes(pub, tmp_path, monk
     assert pub.run("publish", pub.group, stage_id)[0] == 0  # ignored, and verified against the approved bytes
 
 
-@pytest.mark.parametrize("change", [{"attribution_concerns": ("added later",)}, {"course_policy": None}, {"license": "MIT"},
+@pytest.mark.parametrize("change", [{"attribution_concerns": ("added later",)}, {"coursework": True}, {"license": "MIT"},
                                     {"repo_name": "other-name"}])
 def test_any_edit_to_what_was_approved_is_refused(pub, change):
     stage = wf.load_stage(KEY, pub.group, pub.stage())
@@ -770,3 +769,381 @@ def test_dotgit_paths_are_refused_in_any_case():
     for path in (".git/config", ".GIT/config", "src/.Git/hooks/pre-push", "../x", "-x", "C:/x", "a\\b"):
         assert not wf._safe_stage_path(path), path
     assert wf._safe_stage_path("src/Main.txt") and wf._safe_stage_path(".gitignore")
+
+
+# --- coursework is history, not a permission check -------------------------------------------------------
+
+
+def test_coursework_is_recorded_as_history_without_any_permission_claim(pub):
+    stage_id = pub.stage(extra=(*DECLARED, "--coursework"))
+    assert not wf.blockers(wf.run_checks(wf.load_stage(KEY, pub.group, stage_id)))  # nothing to acknowledge
+    provenance = (_staged(pub, stage_id) / "PROVENANCE.md").read_text(encoding="utf-8")
+    assert "Historical context: originally created as coursework" in provenance
+    assert not re.search(r"(?i)permi|allow|polic|universit|course\b", provenance)
+
+
+def test_no_coursework_flag_means_no_mention(pub):
+    assert "coursework" not in (_staged(pub, pub.stage()) / "PROVENANCE.md").read_text(encoding="utf-8")
+
+
+def test_the_course_policy_option_is_gone(pub):
+    with pytest.raises(SystemExit):
+        pcli.main(["stage", pub.group, pub.proposal.id, "--course-policy", "publishing-permitted"])
+
+
+def test_public_still_needs_its_own_approval_for_coursework(pub):
+    stage_id = pub.stage(extra=(*DECLARED, "--coursework", "--visibility", "public"))
+    code, out, _ = pub.run("approve", pub.group, stage_id, answer="publish shelf-tracker")
+    assert code == 1 and "Not approved" in out
+    code, _, err = pub.run("publish", pub.group, stage_id)
+    assert code == 1 and "no unused publication approval" in err and pub.github.created == []
+
+
+def test_a_stage_with_a_course_policy_loads_but_cannot_be_published(pub):
+    stage = wf.load_stage(KEY, pub.group, pub.stage())
+    path = paths.data_dir() / "understanding" / KEY / pub.group / f"publish-stage-{stage.id}.json"
+    record = json.loads(path.read_text(encoding="utf-8"))
+    del record["coursework"]
+    record["course_policy"] = "publishing-permitted"
+    record["resolutions"] = {"pf_x": "an earlier reason"}
+    path.write_text(json.dumps(record), encoding="utf-8")
+    loaded = wf.load_stage(KEY, pub.group, stage.id)
+    assert loaded.resolutions == {"pf_x": "an earlier reason"}
+    with pytest.raises(wf.PublishRefused, match="changed after it was created"):
+        wf.verify_tree(loaded)
+
+
+def test_same_bytes_give_the_same_finding_ids_in_a_new_stage(tmp_path, monkeypatch, fake_system, capsys):
+    group, proposal, ident = _with_source(tmp_path, monkeypatch, fake_system, capsys, f"// {FAKE_EMAIL}\nclass Extra {{}}\n")
+    first = {f.id for f in wf.run_checks(_stage_it(group, proposal, ident, capsys))}
+    second = {f.id for f in wf.run_checks(_stage_it(group, proposal, ident, capsys, "--coursework"))}
+    assert first == second
+
+
+def test_safeguards_remain_without_a_policy(tmp_path, monkeypatch, fake_system, capsys):
+    source = f'// {FAKE_EMAIL}\nclass Extra {{ String t = "{FAKE_TOKEN}"; }}\n'
+    group, proposal, ident = _with_source(tmp_path, monkeypatch, fake_system, capsys, source)
+    assert pcli.main(["stage", group, proposal.id, "--file", ident, "--coursework", "--ownership", "team",
+                      "--license", "none"]) == 0
+    stage_id = re.search(r"as (st_\w+)", capsys.readouterr().out).group(1)
+    kinds = {f.kind: f for f in wf.run_checks(wf.load_stage(KEY, group, stage_id))}
+    assert kinds["github_token"].blocks and not kinds["github_token"].resolvable
+    assert kinds["email_address"].blocks and kinds["attribution_missing"].blocks
+
+
+# --- reviewing and accepting findings together --------------------------------------------------------
+
+SAMPLE = ('/** @author Quillon Marsh */\nclass Extra {\n  String home = "12 Elmwood Avenue";\n'
+          '  String studentId = "S00123456";\n  /** @author Quillon Marsh */\n  int x;\n}\n')
+
+
+@pytest.fixture
+def flagged(tmp_path, monkeypatch, fake_system, capsys):
+    group, proposal, ident = _with_source(tmp_path, monkeypatch, fake_system, capsys, SAMPLE)
+    stage = _stage_it(group, proposal, ident, capsys)
+
+    def run(*args, answer=None):
+        kwargs = {"input_fn": lambda prompt: answer} if answer is not None else {}
+        code = pcli.main(list(args), **kwargs)
+        out = capsys.readouterr()
+        return code, out.out, out.err
+
+    monkeypatch.setattr(pcli, "make_runner", FakeGitHub())
+    return SimpleNamespace(group=group, stage=stage, run=run)
+
+
+def _kinds(stage):
+    return {f.id: f for f in wf.run_checks(wf.load_stage(KEY, stage.group_id, stage.id))}
+
+
+def _ids(flagged, kind):
+    return [i for i, f in _kinds(flagged.stage).items() if f.kind == kind]
+
+
+def test_review_groups_by_file_and_line_and_shows_no_values(flagged):
+    code, out, _ = flagged.run("review", flagged.group, flagged.stage.id)
+    assert code == 0 and "src/com/example/shelf/Extra.java" in out
+    assert "line 1" in out and "line 5" in out and "author_identity" in out and "street_address" in out
+    assert "Quillon" not in out and "Elmwood" not in out and "S00123456" not in out
+    assert all(i in out for i in _ids(flagged, "author_identity"))
+    kinds_line = next(l for l in out.splitlines() if l.strip().startswith("author_identity:"))
+    assert all(i in kinds_line for i in _ids(flagged, "author_identity"))
+
+
+def test_review_accepts_nothing_and_changes_nothing(flagged):
+    before = wf.load_stage(KEY, flagged.group, flagged.stage.id)
+    flagged.run("review", flagged.group, flagged.stage.id)
+    assert wf.load_stage(KEY, flagged.group, flagged.stage.id) == before
+
+
+def test_review_redacted_hides_paths_and_keeps_ids(flagged):
+    _, out, _ = flagged.run("--redact", "review", flagged.group, flagged.stage.id)
+    assert "Extra.java" not in out and all(i in out for i in _ids(flagged, "author_identity"))
+
+
+def test_batch_accept_needs_the_right_count_typed(flagged):
+    ids = _ids(flagged, "author_identity")
+    assert len(ids) == 2
+    for answer in ("accept", "accept 3", "yes", ""):
+        code, out, _ = flagged.run("resolve", flagged.group, flagged.stage.id, *ids, "--reason", "my own name", answer=answer)
+        assert code == 1 and "Not accepted" in out
+    assert all(_kinds(flagged.stage)[i].blocks for i in ids)
+    code, out, _ = flagged.run("resolve", flagged.group, flagged.stage.id, *ids, "--reason", "my own name", answer="accept 2")
+    assert code == 0 and "Accepted 2" in out
+    kinds = _kinds(flagged.stage)
+    assert all(not kinds[i].blocks and kinds[i].resolved == "my own name" for i in ids)
+    assert any(f.blocks for f in kinds.values())  # only what was named
+
+
+def test_batch_accept_refuses_without_a_person_or_a_reason(flagged):
+    ids = _ids(flagged, "author_identity")
+
+    def nobody(prompt):
+        raise EOFError
+
+    assert pcli.main(["resolve", flagged.group, flagged.stage.id, *ids, "--reason", "x"], input_fn=nobody) == 1
+    code, _, err = flagged.run("resolve", flagged.group, flagged.stage.id, *ids, "--reason", "  ", answer="accept 2")
+    assert code == 1 and "reason" in err
+    with pytest.raises(SystemExit):
+        pcli.main(["resolve", flagged.group, flagged.stage.id, *ids])  # --reason is required
+    with pytest.raises(SystemExit):
+        pcli.main(["resolve", flagged.group, flagged.stage.id, *ids, "--reason", "x", "--yes"])
+    with pytest.raises(SystemExit):
+        pcli.main(["resolve", flagged.group, flagged.stage.id, "--reason", "x"])  # nothing is selected for you
+    assert all(_kinds(flagged.stage)[i].blocks for i in ids)
+
+
+def test_one_unknown_id_means_nothing_is_accepted(flagged):
+    ids = _ids(flagged, "author_identity")
+    code, _, err = flagged.run("resolve", flagged.group, flagged.stage.id, *ids, "pf_invented", "--reason", "x", answer="accept 3")
+    assert code == 1 and "Nothing was accepted" in err
+    assert all(_kinds(flagged.stage)[i].blocks for i in ids)
+
+
+def test_secrets_cannot_be_accepted_even_inside_a_batch(tmp_path, monkeypatch, fake_system, capsys):
+    source = f'/** @author Quillon Marsh */\nclass Extra {{ String t = "{FAKE_TOKEN}"; }}\n'
+    group, proposal, ident = _with_source(tmp_path, monkeypatch, fake_system, capsys, source)
+    stage = _stage_it(group, proposal, ident, capsys)
+    monkeypatch.setattr(pcli, "make_runner", FakeGitHub())
+    findings = wf.run_checks(stage)
+    token = next(f for f in findings if f.kind == "github_token")
+    author = next(f for f in findings if f.kind == "author_identity")
+    assert pcli.main(["resolve", group, stage.id, author.id, token.id, "--reason", "x"], input_fn=lambda p: "accept 2") == 1
+    out = capsys.readouterr()
+    assert "github_token" in out.err and "Nothing was accepted" in out.err and FAKE_TOKEN not in out.out + out.err
+    kinds = {f.kind: f for f in wf.run_checks(wf.load_stage(KEY, group, stage.id))}
+    assert kinds["author_identity"].blocks and kinds["github_token"].blocks  # the batch did not half-apply
+    assert pcli.main(["review", group, stage.id]) == 0
+    assert "MUST BE FIXED" in capsys.readouterr().out
+
+
+def test_earlier_acceptances_stay_intact_and_ids_are_stable(flagged):
+    author = _ids(flagged, "author_identity")
+    other = _ids(flagged, "street_address")
+    before = wf.load_stage(KEY, flagged.group, flagged.stage.id)
+    ids_before = set(_kinds(flagged.stage))
+    flagged.run("resolve", flagged.group, flagged.stage.id, author[0], "--reason", "first reason", answer="accept")
+    code, out, _ = flagged.run("resolve", flagged.group, flagged.stage.id, author[0], other[0], "--reason", "second reason",
+                               answer="accept")
+    assert code == 0 and "1 already accepted" in out
+    after = wf.load_stage(KEY, flagged.group, flagged.stage.id)
+    assert after.resolutions[author[0]] == "first reason" and after.resolutions[other[0]] == "second reason"
+    assert after.digest == before.digest and after.files == before.files and after.id == before.id
+    assert set(_kinds(flagged.stage)) == ids_before
+    wf.verify_tree(after)  # the staged files still match, so an approval remains possible
+
+
+def test_every_accepted_finding_has_its_own_audit_entry_without_values(flagged):
+    ids = _ids(flagged, "author_identity")
+    flagged.run("resolve", flagged.group, flagged.stage.id, *ids, "--reason", "private reason text", answer="accept 2")
+    audit = (paths.data_dir() / "understanding" / KEY / flagged.group / "audit.jsonl").read_text(encoding="utf-8")
+    entries = [json.loads(line) for line in audit.splitlines()]
+    assert {e["finding_id"] for e in entries if e["outcome"] == "finding_accepted"} == set(ids)
+    assert "Quillon" not in audit and "private reason text" not in audit
+
+
+def test_accepting_everything_still_needs_the_separate_publication_approval(flagged):
+    for finding_id, finding in _kinds(flagged.stage).items():
+        if finding.blocks:
+            assert flagged.run("resolve", flagged.group, flagged.stage.id, finding_id, "--reason", "invented", answer="accept")[0] == 0
+    assert not wf.blockers(_kinds(flagged.stage).values())
+    code, _, err = flagged.run("publish", flagged.group, flagged.stage.id)
+    assert code == 1 and "no unused publication approval" in err
+
+
+def test_a_stage_saved_before_this_command_loads_with_its_acceptance(flagged):
+    finding = next(iter(_ids(flagged, "street_address")))
+    stage = wf.resolve_finding(wf.load_stage(KEY, flagged.group, flagged.stage.id), _kinds(flagged.stage).values(),
+                               finding, "existing acceptance")
+    code, out, _ = flagged.run("review", flagged.group, stage.id)
+    assert code == 0 and finding not in out and "1 accepted" in out
+
+
+# --- opening a finding in the editor -----------------------------------------------------------------
+
+
+class FakeEditor(FakeGitHub):
+    def __init__(self):
+        super().__init__()
+        self.opened = []
+
+    def __call__(self, argv, cwd):
+        if "--goto" in argv:
+            self.opened.append(argv[-1])
+            return wf.ToolResult(0, "", "")
+        return super().__call__(argv, cwd)
+
+
+@pytest.fixture
+def editor(flagged, monkeypatch):
+    fake = FakeEditor()
+    monkeypatch.setattr(pcli, "make_runner", fake)
+    monkeypatch.setattr(wf.shutil, "which", lambda name: f"/fake/bin/{name}")
+    return fake
+
+
+def _open(flagged, finding_id):
+    return flagged.run("open-finding", flagged.group, flagged.stage.id, finding_id)
+
+
+def test_open_finding_goes_to_the_original_file_at_the_line(flagged, editor):
+    address = _ids(flagged, "street_address")[0]
+    line = _kinds(flagged.stage)[address].line
+    code, out, _ = _open(flagged, address)
+    assert code == 0 and f"your original file at line {line}" in out
+    assert len(editor.opened) == 1
+    assert editor.opened[0].endswith(f"Extra.java:{line}") and "Synthetic" in editor.opened[0]  # the original
+
+
+def test_open_finding_shows_no_path_or_value(flagged, editor, capsys):
+    code, out, err = _open(flagged, _ids(flagged, "street_address")[0])
+    assert code == 0
+    for private in ("Synthetic", "Elmwood", ":\\", "Extra.java"):
+        assert private not in out + err
+
+
+def test_open_finding_changes_nothing(flagged, editor):
+    before = wf.load_stage(KEY, flagged.group, flagged.stage.id)
+    _open(flagged, _ids(flagged, "street_address")[0])
+    assert wf.load_stage(KEY, flagged.group, flagged.stage.id) == before
+
+
+def test_open_finding_uses_the_staged_copy_if_the_original_changed(flagged, editor):
+    address = _ids(flagged, "street_address")[0]
+    stage = wf.load_stage(KEY, flagged.group, flagged.stage.id)
+    item = next(f for f in stage.files if f.path.endswith("Extra.java"))
+    original = next(p for p in (Path(paths.data_dir()).parent / "Synthetic").rglob("Extra.java"))
+    original.write_text("// edited since staging\n" + SAMPLE)
+    code, out, _ = _open(flagged, address)
+    assert code == 0 and "the staged copy" in out
+    assert str(wf.stage_dir(KEY, flagged.group, stage.id)) in editor.opened[0] and item.path.split("/")[-1] in editor.opened[0]
+
+
+def test_open_finding_uses_the_staged_copy_if_the_original_is_gone(flagged, editor):
+    original = next(p for p in (Path(paths.data_dir()).parent / "Synthetic").rglob("Extra.java"))
+    original.unlink()
+    code, out, _ = _open(flagged, _ids(flagged, "street_address")[0])
+    assert code == 0 and "the staged copy" in out
+
+
+def test_open_finding_refuses_what_it_cannot_open(flagged, editor, monkeypatch):
+    code, _, err = _open(flagged, "pf_invented")
+    assert code == 1 and "No such finding" in err
+    whole_project = wf.Finding("x", "ownership", "k", "high", None, None, "d")
+    with pytest.raises(wf.PublishRefused, match="whole project"):
+        wf.open_in_editor(wf.load_stage(KEY, flagged.group, flagged.stage.id), whole_project, [], editor)
+    monkeypatch.setattr(wf.shutil, "which", lambda name: None)
+    code, _, err = _open(flagged, _ids(flagged, "street_address")[0])
+    assert code == 1 and "not found on PATH" in err
+    assert editor.opened == []
+
+
+def test_a_batch_script_never_receives_shell_characters(flagged, editor):
+    stage = wf.load_stage(KEY, flagged.group, flagged.stage.id)
+    finding = _kinds(flagged.stage)[_ids(flagged, "street_address")[0]]
+    item = next(f for f in stage.files if f.path == finding.path)
+    hostile = make_tree(Path(paths.data_dir()).parent / "a&calc", {"Extra.java": "x" * item.size_bytes}) / "Extra.java"
+    candidate = wf.Candidate("f", finding.path, str(hostile), item.size_bytes, None, "code")
+    with pytest.raises(wf.PublishRefused, match="can't be passed safely"):
+        wf.open_in_editor(stage, finding, [candidate], editor, which=lambda name: "C:/fake/bin/code.cmd")
+    assert editor.opened == []
+    assert wf.open_in_editor(stage, finding, [candidate], editor, which=lambda name: "/fake/bin/code") == "your original file"
+
+
+def test_open_finding_works_for_any_language_and_generated_files(tmp_path, monkeypatch, fake_system, capsys):
+    _, group = _project(tmp_path, monkeypatch, fake_system, {
+        "Work/SortLab/main.py": f"# {FAKE_EMAIL}\nprint('hi')\n", "Work/SortLab/other.py": "print(2)\n"}, "SortLab")
+    proposal = _accepted(group)
+    capsys.readouterr()
+    assert pcli.main(["candidates", group]) == 0
+    ident = re.search(r"(f_\w+)  main\.py", capsys.readouterr().out).group(1)
+    stage = _stage_it(group, proposal, ident, capsys)
+    fake = FakeEditor()
+    monkeypatch.setattr(pcli, "make_runner", fake)
+    monkeypatch.setattr(wf.shutil, "which", lambda name: f"/fake/bin/{name}")
+    finding = next(f for f in wf.run_checks(stage) if f.kind == "email_address")
+    assert pcli.main(["open-finding", group, stage.id, finding.id]) == 0
+    assert fake.opened[0].endswith("main.py:1")
+    generated = wf.Finding("x", "privacy", "k", "high", "README.md", 2, "d")
+    assert wf.open_in_editor(stage, generated, [], fake) == "the staged copy"
+
+
+def test_review_mentions_open_finding_without_printing_paths_of_originals(flagged):
+    _, out, _ = flagged.run("review", flagged.group, flagged.stage.id)
+    assert "open-finding" in out and "Synthetic" not in out
+
+
+# --- refreshing a stage after new validation results ----------------------------------------------------
+
+
+def test_refresh_changes_only_the_generated_files_and_keeps_acceptances(flagged, capsys):
+    author = _ids(flagged, "author_identity")
+    flagged.run("resolve", flagged.group, flagged.stage.id, *author, "--reason", "my own name", answer="accept 2")
+    old = wf.load_stage(KEY, flagged.group, flagged.stage.id)
+    proposal = load_proposal(KEY, flagged.group, old.proposal_id)
+    check = _check("compile", "compile_passed", "direct-tool")
+    found = LocalFindings("bi", datetime(2026, 2, 3, tzinfo=UTC), (), (), (), validations=(check,))
+    save_proposal(replace(proposal, local_findings=found))
+    code, out, _ = flagged.run("refresh", flagged.group, old.id)
+    assert code == 0 and "Acceptances carried over: 2. Not carried over: 0." in out
+    assert "PROVENANCE.md" in out and "README.md" in out and "Extra.java" not in out.split("Files that differ:")[1]
+    new_id = re.search(r"New stage (st_\w+)", out).group(1)
+    new = wf.load_stage(KEY, flagged.group, new_id)
+    assert new.resolutions == old.resolutions and new.visibility == old.visibility and new.ownership == old.ownership
+    assert {f.path for f in new.files} == {f.path for f in old.files}
+    root = wf.stage_dir(KEY, flagged.group, new_id)
+    assert "`compile_passed`" in (root / "PROVENANCE.md").read_text(encoding="utf-8")
+    assert "compiled (exit code 0)" in (root / "README.md").read_text(encoding="utf-8")
+    wf.verify_tree(new)
+    wf.verify_tree(old)  # the old stage is left as it was
+
+
+def test_refresh_does_not_approve_or_upload_anything(flagged):
+    github = pcli.make_runner
+    code, out, _ = flagged.run("refresh", flagged.group, flagged.stage.id)
+    assert code == 0 and github.created == []
+    new_id = re.search(r"New stage (st_\w+)", out).group(1)
+    assert wf.find_approval(wf.load_stage(KEY, flagged.group, new_id)) is None
+
+
+def test_an_approval_of_the_old_stage_does_not_cover_a_refreshed_one(pub):
+    old = wf.load_stage(KEY, pub.group, pub.stage())
+    _approve(pub, old.id)
+    _, out, _ = pub.run("refresh", pub.group, old.id)
+    new_id = re.search(r"New stage (st_\w+)", out).group(1)
+    code, _, err = pub.run("publish", pub.group, new_id)
+    assert code == 1 and "no unused publication approval" in err and pub.github.created == []
+
+
+def test_refresh_refuses_a_file_changed_since_the_scan(flagged):
+    original = next((Path(paths.data_dir()).parent / "Synthetic").rglob("Extra.java"))
+    original.write_text("// changed\n" + SAMPLE)
+    code, _, err = flagged.run("refresh", flagged.group, flagged.stage.id)
+    assert code == 1 and "could not be read" in err
+
+
+def test_an_acceptance_for_a_finding_that_no_longer_exists_is_not_carried(flagged):
+    stage = wf.load_stage(KEY, flagged.group, flagged.stage.id)
+    wf.save_stage(replace(stage, resolutions={"pf_gone": "about something else"}))
+    code, out, _ = flagged.run("refresh", flagged.group, stage.id)
+    assert code == 0 and "carried over: 0. Not carried over: 1." in out

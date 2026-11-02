@@ -2,9 +2,13 @@
 
     candidates GROUP              files you may select, and what can never be selected
     stage GROUP PROPOSAL --file ID [--file ID ...] [--visibility {private,public}]
-          --ownership O --course-policy P --license SPDX|none [--attribution TEXT]
+          --ownership O --license SPDX|none [--coursework] [--attribution TEXT]
+    refresh GROUP STAGE           regenerate README.md and PROVENANCE.md after new results; same files, same acceptances
     preview GROUP STAGE           exactly what would be published, and every finding
-    resolve GROUP STAGE FINDING --reason TEXT   accept one high-risk finding, with a reason
+    review GROUP STAGE            unresolved findings by file and line, with their IDs
+    open-finding GROUP STAGE FINDING   open that file at that line in VS Code; nothing is read or sent
+    resolve GROUP STAGE FINDING [FINDING ...] --reason TEXT
+                                  accept the named high-risk findings, with one reason
     approve GROUP STAGE           approve this exact stage (always asks you to type)
     publish GROUP STAGE           create the new repository with the GitHub CLI
 
@@ -29,7 +33,6 @@ from ..understanding.eligibility import assess_run
 from ..understanding.inspectors import DEFAULT_REGISTRY
 from ..understanding.store import append_audit, load_proposal
 from .workflow import (
-    COURSE_POLICY,
     committer_email,
     OWNERSHIP,
     PRIVATE,
@@ -41,12 +44,15 @@ from .workflow import (
     create_stage,
     find_approval,
     format_preview,
+    format_review,
     github_account,
     list_candidates,
     load_stage,
     name_is_free,
+    open_in_editor,
+    refresh_stage,
     publish,
-    resolve_finding,
+    resolve_findings,
     run_checks,
     run_tool,
     save_approval,
@@ -72,18 +78,22 @@ def build_parser() -> argparse.ArgumentParser:
                        help="a file to include; repeat for each. Nothing is included by default")
     stage.add_argument("--visibility", choices=VISIBILITIES, default=PRIVATE)
     stage.add_argument("--ownership", choices=OWNERSHIP)
-    stage.add_argument("--course-policy", choices=COURSE_POLICY)
+    stage.add_argument("--coursework", action="store_true", help="note in PROVENANCE.md that this began as coursework")
     stage.add_argument("--license", metavar="SPDX|none")
     stage.add_argument("--attribution", help="credit for other people's code; goes in PROVENANCE.md")
     # Deliberately no --yes on approve: permission to publish is always typed by a person.
-    for name in ("preview", "approve", "publish"):
+    for name in ("preview", "review", "refresh", "approve", "publish"):
         command = sub.add_parser(name)
         command.add_argument("group")
         command.add_argument("stage")
+    open_finding = sub.add_parser("open-finding", help="open a finding's file at its line in VS Code")
+    open_finding.add_argument("group")
+    open_finding.add_argument("stage")
+    open_finding.add_argument("finding")
     resolve = sub.add_parser("resolve")
     resolve.add_argument("group")
     resolve.add_argument("stage")
-    resolve.add_argument("finding")
+    resolve.add_argument("finding", nargs="+", help="one or more finding IDs; nothing is selected for you")
     resolve.add_argument("--reason", required=True)
     return parser
 
@@ -129,7 +139,7 @@ def _run(args: argparse.Namespace, input_fn: Callable[[str], str]) -> int:
         eligibility = {e.group_id: e for e in assess_run(grouping, inventory)}[group.id]
         stage = create_stage(inventory_key=key, group=group, eligibility=eligibility, inventory=inventory,
                              proposal=load_proposal(key, group.id, args.proposal), privacy=privacy, file_ids=args.files,
-                             visibility=args.visibility, ownership=args.ownership, course_policy=args.course_policy,
+                             visibility=args.visibility, ownership=args.ownership, coursework=args.coursework,
                              license_id=args.license, attribution=args.attribution)
         findings = run_checks(stage, identity_terms=terms, inspector=inspector)
         print(f"Staged {len(stage.files)} file(s) as {stage.id}. Nothing was uploaded, and GitHub was not contacted.")
@@ -137,20 +147,62 @@ def _run(args: argparse.Namespace, input_fn: Callable[[str], str]) -> int:
         return EXIT_OK
 
     stage = load_stage(key, group.id, args.stage)
+    if args.command == "refresh":
+        eligibility = {e.group_id: e for e in assess_run(grouping, inventory)}[group.id]
+        refreshed, changed, dropped = refresh_stage(
+            stage, group=group, eligibility=eligibility, inventory=inventory, privacy=privacy,
+            proposal=load_proposal(key, group.id, stage.proposal_id), identity_terms=terms, inspector=inspector)
+        print(f"New stage {refreshed.id} replaces {stage.id}. Nothing was uploaded.")
+        print(f"  Files that differ: {('[hidden]' if args.redact else ', '.join(changed)) if changed else 'none'}")
+        print(f"  Acceptances carried over: {len(refreshed.resolutions)}. Not carried over: {dropped}.")
+        return EXIT_OK
+
     email = committer_email(stage, make_runner)
     findings = run_checks(stage, identity_terms=terms, inspector=inspector, committer_email=email)
 
-    if args.command == "resolve":
+    if args.command == "review":
+        print(format_review(findings, redact_names=args.redact))
+        return EXIT_OK
+
+    if args.command == "open-finding":
         match = next((f for f in findings if f.id == args.finding), None)
         if match is None:
             raise PublishRefused("No such finding for this stage.")
-        answer = _ask(input_fn, f"Accept {match.check}/{match.kind} as safe to publish?\nType 'accept' to continue: ")
-        if answer != "accept":
+        which = open_in_editor(stage, match, list_candidates(group, inventory, privacy, key)[0], make_runner)
+        print(f"Opened {which} at line {match.line or 1} in VS Code ({match.kind}). "
+              "Nothing was read into this output or sent anywhere.")
+        return EXIT_OK
+
+    if args.command == "resolve":
+        by_id = {f.id: f for f in findings}
+        selected = list(dict.fromkeys(args.finding))
+        # Refused before asking, so you are never asked to confirm something that cannot be accepted.
+        if not args.reason.strip():
+            raise PublishRefused("Give a reason.")
+        known = [by_id[i] for i in selected if i in by_id]
+        if len(known) != len(selected):
+            raise PublishRefused("A finding ID is not in this stage. Nothing was accepted.")
+        pending = [f for f in known if f.resolved is None]
+        print(f"Selected {len(pending)} finding(s) to accept, with this reason: {'[hidden]' if args.redact else args.reason.strip()}")
+        for f in pending:
+            where = "" if args.redact else f"  {f.path or 'project'}" + (f":{f.line}" if f.line else "")
+            print(f"  {f.id}  {f.check}/{f.kind}{where}")
+        if len(known) != len(pending):
+            print(f"  {len(known) - len(pending)} already accepted: left as they are, with their original reasons.")
+        fixed_only = sorted({f.kind for f in known if not f.resolvable})
+        if fixed_only or not pending:
+            resolve_findings(stage, findings, selected, args.reason)  # refuses, or changes nothing
+            print("Nothing new to accept.")
+            return EXIT_OK
+        word = "accept" if len(pending) == 1 else f"accept {len(pending)}"
+        if _ask(input_fn, f"Have you checked each one, and is it safe to publish?\nType '{word}' to continue: ") != word:
             print("Not accepted.")
             return EXIT_ERROR
-        resolve_finding(stage, findings, args.finding, args.reason)
-        append_audit(key, group.id, {"stage_id": stage.id, "outcome": "finding_accepted", "kind": match.kind})
-        print("Accepted, with your reason recorded locally.")
+        resolve_findings(stage, findings, selected, args.reason)
+        for f in pending:
+            append_audit(key, group.id, {"stage_id": stage.id, "finding_id": f.id, "outcome": "finding_accepted",
+                                         "kind": f.kind})
+        print(f"Accepted {len(pending)} finding(s), with your reason recorded locally.")
         return EXIT_OK
 
     if args.command == "publish":

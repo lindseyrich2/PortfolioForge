@@ -60,12 +60,19 @@ def inspection_flags(inspection: BuildInspection) -> list[str]:
 
 def apply_inspection(proposal: AnalysisProposal, inspection: BuildInspection,
                      validations: tuple[ValidationResult, ...] = (), now: datetime | None = None) -> AnalysisProposal:
-    """Add local findings to a proposal. Local only; calling this again replaces them."""
-    if proposal.status == "accepted":
-        raise ProposalError("This proposal is already accepted; apply findings before accepting it.")
+    """Add local findings to a proposal. Local only; calling this again replaces them.
+
+    An accepted proposal keeps its name, status and findings; it can only take new validation
+    results for the inspection it already uses, so what was observed can still reach the README.
+    """
     if (proposal.inventory_key, proposal.group_id) != (inspection.inventory_key, inspection.group_id):
         raise ProposalError("This inspection belongs to a different project.")
     previous = proposal.local_findings
+    if proposal.status == "accepted":
+        if previous is None or previous.inspection_id != inspection.id:
+            raise ProposalError("This proposal is already accepted; apply findings before accepting it.")
+        return replace(proposal, local_findings=replace(
+            previous, validations=tuple(v for v in validations if v.inspection_id == inspection.id)))
     flags = list(proposal.review_flags)
     if previous:  # back out what the earlier inspection did
         flags = [f for f in flags if f not in previous.added_flags] + list(previous.resolved_flags)
