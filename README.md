@@ -19,6 +19,7 @@ Past projects, especially academic ones, tend to be scattered: course folders on
 | Google Drive and Google Colab sources | 🗓️ Planned |
 | Documentation generation | 🗓️ Planned |
 | **Publishing to GitHub** (one new repository per project, after checks and typed approval; private by default) | ✅ Implemented, opt-in |
+| **Batch processing** (many projects, one consolidated review; private only) | ✅ Implemented, opt-in |
 
 Nothing in PortfolioForge contacts an AI model unless you explicitly approve a disclosure manifest and then confirm sending it. Nothing is published unless you approve that exact publication, by typing it.
 
@@ -466,6 +467,40 @@ Your git name and email go into the commit. A public repository makes them publi
 - **If the upload fails after the repository was created,** an empty repository may remain, and you'd need to delete it yourself before retrying that name.
 - **Editing the README** means changing the proposal before accepting it; the staged README can't be edited.
 
+## Batch processing
+
+This runs the stages above across all your candidate projects, so decisions are made together instead of project by project. It adds no new way to read, send, run or publish anything: each step goes through the same gates.
+
+```powershell
+python -m portfolioforge.batch run --provider anthropic   # prepare all that can be prepared; never asks, sends or runs
+python -m portfolioforge.batch review                     # projects, names, readiness, validation, privacy, duplicates, decisions
+python -m portfolioforge.batch approve-read <GROUP> <GROUP> ...      # allow reading these files locally
+python -m portfolioforge.batch send <GROUP> <GROUP> ...              # send these exact disclosures to the AI provider
+python -m portfolioforge.batch accept-names <GROUP> <GROUP>=<SLUG> ...
+python -m portfolioforge.batch validate <GROUP> ... --action compile # or run
+python -m portfolioforge.batch stage <GROUP> ... --ownership mine --license none
+python -m portfolioforge.batch publish <GROUP> ...                   # previews each one, and asks for each one
+python -m portfolioforge.batch status
+python -m portfolioforge.batch resume                                # after an interruption
+```
+
+- **`run` and `resume` are safe to repeat.** A project's state is worked out from the existing records each time, so finished work, including earlier AI answers and published repositories, is recognized and never redone.
+- **Automatic:** ordering candidates (likely engineering projects first), flagging possible duplicates, and, once you've allowed reading, local extraction, inspection, preparing disclosure manifests and validation plans, and regenerating staged documents when new results arrive.
+- **Each decision lists what it covers and needs a typed confirmation** that includes the count. Every disclosure keeps its own approval, payload hash, provider and model; a changed payload isn't sent, and the others still go.
+- **A send that ends unclearly is never repeated by itself.** After an interruption, timeout, connection failure or server error, the request may already have been processed or charged, so the project waits for your `send --resend`. PortfolioForge also turns off the Anthropic SDK's own automatic retries. An answer saved before an interruption is used without a new request.
+- **You can set projects aside at any point** with `exclude` (for unrelated work or a duplicate) or `defer`, and bring them back with `restore`. Nothing is read or sent for them.
+- **Every valid AI name suggestion is shown in the review.** The first is the visible default, and you can choose another.
+- **Publishing is private only, and each repository is previewed and approved individually.** A taken name is never overwritten. One project's problem doesn't stop the others.
+- **Program output stays out of the batch output,** and stays in a redacted local record.
+- **Sensitive findings use the existing commands:** `python -m portfolioforge.publishing review`, `open-finding` and `resolve`.
+
+**Limitations:**
+- **Scanning isn't included.** Run the inventory scan first; `run` works from the latest inventory and its grouping.
+- **Only one batch command should run at a time.** There is no lock between terminals.
+- **Only a provider refusal that shows the request was never accepted (such as HTTP 400 or 429) lets a project be sent normally again.** The provider's own usage page is the final word on charges.
+- **Staging uses the files you approved for reading.** To publish fewer, or data files, use `python -m portfolioforge.publishing stage` for that project.
+- **A statement given to `stage` covers every project named in that command,** so run it separately for projects whose ownership or license differs.
+
 ## Privacy and your data
 
 PortfolioForge works with the names and locations of your personal files, so it is built to keep that information on your computer.
@@ -600,6 +635,7 @@ PortfolioForge/
 │   │   ├── findings.py             # local findings into proposals and new manifests
 │   │   └── store.py, models.py, cli.py
 │   ├── publishing/                 # staging, blocking checks, approval and GitHub CLI upload
+│   ├── batch/                      # job queue and consolidated review over the stages above
 │   ├── grouping/                   # metadata-only candidate grouping (python -m portfolioforge.grouping)
 │   │   ├── features.py, index.py   # name features; folder tree from the saved inventory
 │   │   ├── segment.py, clustering.py   # course → assignment/project hierarchy; loose-file splitting
