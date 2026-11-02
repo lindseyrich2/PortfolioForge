@@ -447,6 +447,7 @@ class AnalysisProposal:
             command("Testing", "Run the tests:", primary["test"].command, primary["test"].working_dir)
         steps("Testing", self.usage.test_instructions, "test" in primary)
         guess("Testing", "test", "run the tests:")
+        local_check("test", "Testing")
         if not sections["Testing"]:
             bullet("Testing", "⚠ Not determined from the available evidence.")
 
@@ -539,6 +540,9 @@ _VALIDATION_WORDS = {
     "run_exit_zero": "the program exited with code 0, which does not show that it behaved correctly.",
     "run_nonzero": "the program exited with a non-zero code.",
     "run_timed_out": "the program reached the time limit and was stopped.",
+    "test_passed": "the test command exited with code 0.",
+    "test_failed": "the test command exited with a non-zero code.",
+    "test_timed_out": "the test command reached the time limit and was stopped.",
     "tool_missing": "the check could not run because a required tool was missing.",
 }
 

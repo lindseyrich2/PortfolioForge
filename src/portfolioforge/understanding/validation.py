@@ -34,7 +34,7 @@ import time
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Callable
+from typing import Callable, Iterable
 
 from ..grouping.scoring import stable_id
 from ..paths import ensure_safe_output_dir
@@ -52,8 +52,11 @@ from .models import (
 from .reader import ApprovedFileReader, ReadRefused
 from .redact import redact
 
-#: Actions any inspector may offer: "compile" prepares the code; "run" runs it.
-ACTIONS = ("compile", "run")
+#: Actions any inspector may offer: "compile" prepares the code; "run" and "test" run it.
+ACTIONS = ("compile", "run", "test")
+#: Step stage -> outcome when it exits with code 0, and when it does not.
+_PASSED = {"compile": "compile_passed", "run": "run_exit_zero", "test": "test_passed"}
+_FAILED = {"compile": "compile_failed", "run": "run_nonzero", "test": "test_failed"}
 DEFAULT_RUN_TIMEOUT = 30
 COMPILE_TIMEOUT = 120
 MAX_TIMEOUT = 300
@@ -386,15 +389,38 @@ def execute_plan(plan: ValidationPlan, approval: ValidationApproval | None, read
                 outcome = f"{stage}_timed_out"
                 break
             if ran.exit_code != 0:
-                outcome = "compile_failed" if is_compile else "run_nonzero"
+                outcome = _FAILED[stage]
                 break
-            outcome = "compile_passed" if is_compile else "run_exit_zero"
+            outcome = _PASSED[stage]
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
     removed = not os.path.exists(work_dir)
     if not removed:
         notes.append("The temporary copy could not be fully deleted.")
     return result(outcome, tuple(steps), versions, notes, removed)
+
+
+def validation_status(inspection: BuildInspection, results: Iterable[ValidationResult],
+                      registry: InspectorRegistry = DEFAULT_REGISTRY) -> dict[str, str]:
+    """For compile, run and test: what is actually known. Never guesses."""
+    inspector = registry.get(inspection.inspector)
+    if inspector is None:
+        return {action: "unavailable: manual review needed, no inspector for this project type" for action in ACTIONS}
+    latest = {r.action: r for r in sorted(results, key=lambda r: r.finished_at) if r.inspection_id == inspection.id}
+    status = {}
+    for action in ACTIONS:
+        result = latest.get(action)
+        if action not in inspector.validation_actions():
+            status[action] = "unavailable: this project type offers no such check"
+        elif result is None:
+            status[action] = "not run yet: needs your approval"
+        elif result.outcome == "tool_missing":
+            status[action] = "could not run: a required tool is missing"
+        elif result.outcome == _PASSED[action]:
+            status[action] = f"succeeded ({result.outcome})"
+        else:
+            status[action] = f"failed ({result.outcome})"
+    return status
 
 
 def describe_outcome(result: ValidationResult) -> str:
@@ -405,5 +431,8 @@ def describe_outcome(result: ValidationResult) -> str:
         "run_exit_zero": "The program exited with code 0. That does not show it behaved correctly.",
         "run_nonzero": "The program exited with a non-zero code.",
         "run_timed_out": "The program reached the time limit and was stopped.",
+        "test_passed": "The test command exited with code 0.",
+        "test_failed": "The test command exited with a non-zero code.",
+        "test_timed_out": "The test command reached the time limit and was stopped.",
         "tool_missing": "A required tool was not found, so nothing was run.",
     }.get(result.outcome, result.outcome)

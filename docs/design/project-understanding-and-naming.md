@@ -175,7 +175,7 @@ Rules:
 - Files keep their original names unless the user approves a rename. The mapping goes in `PROVENANCE.md` or a manifest.
 - The generated README has an "Origin" section using wording the user approves.
 - Third-party code is attributed with its license, or left out.
-- An academic-integrity confirmation is required before publishing coursework.
+- Coursework is recorded as history in `PROVENANCE.md` when the user says so. PortfolioForge makes no statement about course or university permission; that remains the user's own responsibility.
 
 ## Review
 

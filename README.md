@@ -359,11 +359,13 @@ Neither label means the command was run.
 ### Optional local validation
 
 ```powershell
-python -m portfolioforge.understanding plan-validation <GROUP> --action compile   # or: --action run [--entry NAME]
+python -m portfolioforge.understanding plan-validation <GROUP>   # compile, run and test status, and each plan; or --action compile
 python -m portfolioforge.understanding approve-validation <GROUP> <PLAN>          # no --yes: you always type it
 python -m portfolioforge.understanding validate <GROUP> <PLAN>
 ```
 
+- **A project type offers only the checks its inspector supports.** Others are reported as unavailable, as is everything for a project with no inspector. Java offers compile and run, because tests would need libraries that aren't copied.
+- **Results reach the published files.** `apply-inspection` records them, even on an accepted proposal, and `python -m portfolioforge.publishing refresh <GROUP> <STAGE>` regenerates `README.md` and `PROVENANCE.md` in a new stage. Acceptances carry over only where the file's bytes are unchanged.
 - **Each plan shows its exact commands.** An approval covers that plan once. Approving `compile` doesn't authorize `run`, and `run` needs you to type `run my code`.
 - **Nothing runs if anything changed.** The plan's hash, its commands and each source file's hash are checked again first.
 - **It works on a temporary copy of the approved sources,** deleted afterwards, with a reduced environment, no shell, no input, a time limit and capped, redacted output.
@@ -441,16 +443,18 @@ This stage publishes one accepted project to its own new repository, using your 
 
 ```powershell
 python -m portfolioforge.publishing candidates <GROUP>     # files you may select; nothing is selected by default
-python -m portfolioforge.publishing stage <GROUP> <PROPOSAL> --file <ID> --file <ID> --ownership mine --course-policy not-coursework --license none
+python -m portfolioforge.publishing stage <GROUP> <PROPOSAL> --file <ID> --file <ID> --ownership mine --license none
 python -m portfolioforge.publishing preview <GROUP> <STAGE>   # the exact files, name, visibility, README and provenance
-python -m portfolioforge.publishing resolve <GROUP> <STAGE> <FINDING> --reason "..."   # accept one finding, if it is safe
+python -m portfolioforge.publishing review <GROUP> <STAGE>    # unresolved findings by file and line, with their IDs
+python -m portfolioforge.publishing open-finding <GROUP> <STAGE> <FINDING>   # open that file at that line in VS Code
+python -m portfolioforge.publishing resolve <GROUP> <STAGE> <FINDING> [<FINDING> ...] --reason "..."   # accept the ones you checked
 python -m portfolioforge.publishing approve <GROUP> <STAGE>   # no --yes: you always type it
 python -m portfolioforge.publishing publish <GROUP> <STAGE>
 ```
 
 - **Only what you name is included.** Selected files are copied unchanged into a staging folder in your data folder, outside any repository, through the same guarded reader as every other stage. `README.md` and `PROVENANCE.md` are generated there. Credential-looking files and private folders can't be selected.
-- **High-risk findings block publication.** The checks run on the staged bytes and cover privacy, sensitive data, ownership, third-party attribution and licensing. Anything that could identify a person (including author lines and identifiers in file paths) blocks, and so does anything that can't be scanned, such as a PDF or a notebook's saved outputs. Real secrets (private keys, access tokens) can only be fixed. Other findings, such as a false alarm, can be accepted one at a time with a recorded reason. Ownership, course policy and a license choice must be stated.
-- **Private by default.** `--visibility public` is a separate choice, and approving it needs a different typed phrase.
+- **High-risk findings block publication.** The checks run on the staged bytes and cover privacy, sensitive data, ownership, third-party attribution and licensing. Anything that could identify a person (including author lines and identifiers in file paths) blocks, and so does anything that can't be scanned, such as a PDF or a notebook's saved outputs. Real secrets (private keys, access tokens) can only be fixed. Other findings, such as a false alarm, can be accepted one at a time with a recorded reason. Ownership and a license choice must be stated. `--coursework` records that history in `PROVENANCE.md`.
+- **Private by default.** `--visibility public` is a separate choice, and approving it needs a different typed phrase. PortfolioForge can't stop a repository being made public later on GitHub itself.
 - **Existing repositories are never touched.** The name is checked at preview and again just before publishing. Only a clear "not found" counts as free, and the workflow only ever creates a new repository. GitHub is told only the name until you publish.
 - **Approval is single-use.** It covers that exact stage, name, visibility and GitHub account. Before uploading, every file's hash and all the checks run again, and the commit itself must hold exactly the approved bytes. Approval can't be given with `--redact`.
 

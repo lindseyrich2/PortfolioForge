@@ -45,7 +45,6 @@ from ..understanding.store import _write, group_dir, latest_build_approval
 PRIVATE, PUBLIC = "private", "public"
 VISIBILITIES = (PRIVATE, PUBLIC)
 OWNERSHIP = ("mine", "team", "includes-starter-code", "includes-third-party")
-COURSE_POLICY = ("not-coursework", "publishing-permitted")
 GENERATED = ("README.md", "PROVENANCE.md")
 _SAFE_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
 _SAFE_LICENSE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.+-]{0,39}$")
@@ -58,8 +57,7 @@ _THIRD_PARTY_PATH = re.compile(r"(?i)(?:^|/)(?:lib|libs|vendor|third[_-]?party|n
 #: Real secrets and pipeline records. These can only be fixed, never accepted.
 _NEVER_RESOLVABLE = frozenset({"private_key", "github_token", "aws_access_key", "personal_data_file", "inventory_data",
                                "sensitive_file", "generated_file_leak", "unconfirmed_ownership",
-                               "unconfirmed_course_policy", "license_file_missing", "license_not_chosen",
-                               "attribution_missing"})
+                               "license_file_missing", "license_not_chosen", "attribution_missing"})
 _PRIVACY_RULES_HIGH = frozenset({"personal_data_file", "inventory_data", "private_key", "github_token", "aws_access_key",
                                  "generic_secret", "absolute_home_path", "local_identity", "data_file", "large_file"})
 
@@ -118,7 +116,7 @@ class Stage:
     repo_name: str
     visibility: str
     ownership: str | None
-    course_policy: str | None
+    coursework: bool
     license: str | None
     attribution: str | None
     attribution_concerns: tuple[str, ...]
@@ -206,9 +204,9 @@ def _git_blob(data: bytes) -> str:
     return hashlib.sha1(b"blob %d\0" % len(data) + data, usedforsecurity=False).hexdigest()
 
 
-def _digest(repo_name: str, visibility: str, ownership: str | None, course_policy: str | None, license_id: str | None,
+def _digest(repo_name: str, visibility: str, ownership: str | None, coursework: bool, license_id: str | None,
             attribution: str | None, concerns: Iterable[str], files: Iterable[StagedFile]) -> str:
-    body = {"name": repo_name, "visibility": visibility, "ownership": ownership, "course_policy": course_policy,
+    body = {"name": repo_name, "visibility": visibility, "ownership": ownership, "coursework": coursework,
             "license": license_id, "attribution": attribution, "attribution_concerns": list(concerns),
             "files": sorted([f.path, f.sha256, f.git_blob, f.generated] for f in files)}
     return hashlib.sha256(json.dumps(body, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
@@ -216,7 +214,7 @@ def _digest(repo_name: str, visibility: str, ownership: str | None, course_polic
 
 def create_stage(*, inventory_key: str, group: CandidateGroup, eligibility: Eligibility, proposal: AnalysisProposal,
                  inventory: Inventory, privacy: PrivacySettings, file_ids: list[str], visibility: str = PRIVATE,
-                 ownership: str | None = None, course_policy: str | None = None, license_id: str | None = None,
+                 ownership: str | None = None, coursework: bool = False, license_id: str | None = None,
                  attribution: str | None = None, now: datetime | None = None) -> Stage:
     """Copy the selected files, unchanged, and generate README.md and PROVENANCE.md."""
     if proposal.status != "accepted" or not proposal.accepted_name:
@@ -263,14 +261,14 @@ def create_stage(*, inventory_key: str, group: CandidateGroup, eligibility: Elig
             raise PublishRefused(f"A selected file could not be read: {exc}") from None
     contents["README.md"] = proposal.readme_markdown(draft=False).encode("utf-8")
     contents["PROVENANCE.md"] = provenance_markdown(
-        proposal, chosen, visibility, ownership, course_policy, license_id, attribution).encode("utf-8")
+        proposal, chosen, visibility, ownership, coursework, license_id, attribution).encode("utf-8")
 
     files = tuple(StagedFile(path, hashlib.sha256(data).hexdigest(), len(data), _git_blob(data), path in GENERATED)
                   for path, data in sorted(contents.items()))
     concerns = tuple(redact(str(c))[0] for c in proposal.attribution_concerns)
-    digest = _digest(proposal.accepted_name, visibility, ownership, course_policy, license_id, attribution, concerns, files)
+    digest = _digest(proposal.accepted_name, visibility, ownership, coursework, license_id, attribution, concerns, files)
     stage = Stage(stable_id("st", digest, created.isoformat()), inventory_key, group.id, proposal.id,
-                  proposal.accepted_name, visibility, ownership, course_policy, license_id, attribution,
+                  proposal.accepted_name, visibility, ownership, coursework, license_id, attribution,
                   concerns, files, digest, created.isoformat())
     root = ensure_safe_output_dir(stage_dir(inventory_key, group.id, stage.id))
     for path, data in contents.items():
@@ -281,18 +279,43 @@ def create_stage(*, inventory_key: str, group: CandidateGroup, eligibility: Elig
     return stage
 
 
+def refresh_stage(old: Stage, *, group: CandidateGroup, eligibility: Eligibility, proposal: AnalysisProposal,
+                  inventory: Inventory, privacy: PrivacySettings, identity_terms: Iterable[str] = (), inspector=None,
+                  now: datetime | None = None) -> tuple[Stage, list[str], int]:
+    """A new stage with the same files and declarations and freshly generated documents.
+
+    An acceptance carries over only if its finding ID still exists. That ID depends on the file's
+    exact bytes and the line, so a change in anything accepted means deciding again.
+    Returns the new stage, the paths that differ, and how many acceptances could not carry over.
+    """
+    originals = [f for f in old.files if not f.generated]
+    by_path = {c.project_path: c for c in list_candidates(group, inventory, privacy, old.inventory_key)[0]}
+    if any(f.path not in by_path for f in originals):
+        raise PublishRefused("A staged file is no longer selectable, so stage it again by hand.")
+    new = create_stage(inventory_key=old.inventory_key, group=group, eligibility=eligibility, proposal=proposal,
+                       inventory=inventory, privacy=privacy, file_ids=[by_path[f.path].file_id for f in originals],
+                       visibility=old.visibility, ownership=old.ownership, coursework=old.coursework,
+                       license_id=old.license, attribution=old.attribution, now=now)
+    before, after = {f.path: f.sha256 for f in old.files}, {f.path: f.sha256 for f in new.files}
+    changed = sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p))
+    current = {f.id for f in run_checks(new, identity_terms=identity_terms, inspector=inspector)}
+    carried = {i: reason for i, reason in old.resolutions.items() if i in current}
+    new = replace(new, resolutions=carried)
+    save_stage(new)
+    return new, changed, len(old.resolutions) - len(carried)
+
+
 def provenance_markdown(proposal: AnalysisProposal, chosen: Sequence[Candidate], visibility: str, ownership: str | None,
-                        course_policy: str | None, license_id: str | None, attribution: str | None) -> str:
+                        coursework: bool, license_id: str | None, attribution: str | None) -> str:
     """Where this came from and what is actually known. Project-relative paths only."""
     found = proposal.local_findings
     dates = sorted(c.modified_at[:10] for c in chosen if c.modified_at)
-    origin = {None: "not confirmed", "not-coursework": "the publisher states this is not coursework",
-              "publishing-permitted": "coursework; the publisher states the course allows publishing it"}
     lines = ["# Provenance", "", "## Original material", "",
              f"- Files: {len(chosen)}, with their original names and relative paths (listed below)",
-             f"- Origin: {origin.get(course_policy, 'not confirmed')}",
              f"- Ownership stated by the publisher: {ownership or 'not confirmed'}",
              f"- License chosen by the publisher: {license_id or 'not chosen'}"]
+    if coursework:
+        lines.append("- Historical context: originally created as coursework")
     if dates:
         lines.append(f"- Last modified between {dates[0]} and {dates[-1]}")
     if attribution:
@@ -320,17 +343,17 @@ def provenance_markdown(proposal: AnalysisProposal, chosen: Sequence[Candidate],
             lines.append(f"- {label}: no command is confirmed by the project's files. Anything in the README marked ⚠ "
                          "is an unverified suggestion.")
     checks = {v.action: v for v in sorted(found.validations if found else (), key=lambda v: v.finished_at)}
-    for action in ("compile", "run"):
+    for action in ("compile", "run", "test"):
         v = checks.get(action)
         if v is None or not v.steps:
-            lines.append(f"- Local {action} check: **not executed**.")
+            missing = " A required tool was missing." if v is not None else ""
+            lines.append(f"- Local {action} check: **not executed**.{missing}")
             continue
         tools = ", ".join(f"`{s.label}`" for s in v.steps)
         versions_seen = ", ".join(sorted(v.tool_versions.values())) or "version not recorded"
         lines.append(f"- Local {action} check: executed {tools} ({versions_seen}) on a temporary copy of the sources "
                      f"approved then, on {v.finished_at.date().isoformat()}, with outcome `{v.outcome}`. An exit code "
                      "does not show the program behaved correctly.")
-    lines.append("- Tests: **not executed** by PortfolioForge.")
     return "\n".join(lines) + "\n"
 
 
@@ -415,9 +438,6 @@ def run_checks(stage: Stage, *, identity_terms: Iterable[str] = (), inspector=No
         general("ownership", "unconfirmed_ownership", "high", "state who wrote this project (--ownership)")
     elif stage.ownership != "mine" and not attributed:
         general("attribution", "attribution_missing", "high", f"ownership is {stage.ownership}; add --attribution")
-    if stage.course_policy not in COURSE_POLICY:
-        general("ownership", "unconfirmed_course_policy", "high",
-                "confirm this is not coursework, or that the course allows publishing (--course-policy)")
     if stage.attribution_concerns and not attributed:
         general("attribution", "ai_attribution_concern", "high",
                 f"the analysis noted {len(stage.attribution_concerns)} possible third-party or template concern(s)")
@@ -439,22 +459,84 @@ def blockers(findings: Iterable[Finding]) -> list[Finding]:
     return [f for f in findings if f.blocks]
 
 
-def resolve_finding(stage: Stage, findings: Iterable[Finding], finding_id: str, reason: str) -> Stage:
-    match = next((f for f in findings if f.id == finding_id), None)
-    if match is None:
-        raise PublishRefused("No such finding for this stage.")
-    if not match.resolvable:
-        raise PublishRefused("This finding cannot be accepted. Fix it, or deselect the file, and stage again.")
+def resolve_findings(stage: Stage, findings: Iterable[Finding], finding_ids: Iterable[str], reason: str) -> Stage:
+    """Accept the named findings with one reason, all or none. Earlier acceptances are never overwritten."""
+    by_id = {f.id: f for f in findings}
+    wanted = list(dict.fromkeys(finding_ids))
+    if any(i not in by_id for i in wanted):
+        raise PublishRefused("A finding ID is not in this stage. Nothing was accepted.")
+    fixed_only = sorted({by_id[i].kind for i in wanted if not by_id[i].resolvable})
+    if fixed_only:
+        raise PublishRefused(f"These cannot be accepted: {', '.join(fixed_only)}. Fix them, or deselect the file, and "
+                             "stage again. Nothing was accepted.")
     if not reason.strip():
         raise PublishRefused("Give a reason.")
-    updated = replace(stage, resolutions={**stage.resolutions, finding_id: reason.strip()})
+    added = {i: reason.strip() for i in wanted if by_id[i].resolved is None}
+    updated = replace(stage, resolutions={**stage.resolutions, **added})
     save_stage(updated)
     return updated
 
 
+def resolve_finding(stage: Stage, findings: Iterable[Finding], finding_id: str, reason: str) -> Stage:
+    return resolve_findings(stage, findings, [finding_id], reason)
+
+
+def format_review(findings: Sequence[Finding], *, redact_names: bool = False) -> str:
+    """Blocking findings by file and line, then their IDs by kind, ready to select. Values are never shown."""
+    blocking = blockers(findings)
+    lines = [f"{len(blocking)} unresolved finding(s), {sum(f.resolved is not None for f in findings)} accepted, "
+             f"{sum(f.severity != 'high' for f in findings)} review-only. Values are never shown."]
+    by_file: dict[str, list[Finding]] = {}
+    for finding in blocking:
+        by_file.setdefault(finding.path or "(whole project)", []).append(finding)
+    for number, path in enumerate(sorted(by_file), start=1):
+        lines += ["", f"[file {number}]" if redact_names else path]
+        for f in sorted(by_file[path], key=lambda f: (f.line or 0, f.kind)):
+            state = "" if f.resolvable else "  MUST BE FIXED: cannot be accepted"
+            lines.append(f"  line {f.line or '-'}  {f.id}  {f.kind}{state}" + ("" if redact_names else f": {f.detail}"))
+    by_kind: dict[str, list[str]] = {}
+    for f in blocking:
+        if f.resolvable:
+            by_kind.setdefault(f.kind, []).append(f.id)
+    if by_kind:
+        lines += ["", "IDs by kind, to copy only after checking each one:"]
+        lines += [f"  {kind}: {' '.join(ids)}" for kind, ids in sorted(by_kind.items())]
+    if blocking:
+        lines += ["", "To see one in VS Code: open-finding GROUP STAGE FINDING"]
+    return "\n".join(lines)
+
+
+def open_in_editor(stage: Stage, finding: Finding, candidates: Iterable[Candidate], run: Runner,
+                   which: Callable[[str], str | None] | None = None) -> str:
+    """Open a finding's file at its line in VS Code. Says which copy, never the path. Reads no contents.
+
+    The original is opened if it still has the size that was staged, so the line numbers apply.
+    Otherwise (or for a generated file) the staged copy is, which is exactly what would be published.
+    """
+    if finding.path is None:
+        raise PublishRefused("This finding is about the whole project, so there is no file to open.")
+    item = next(f for f in stage.files if f.path == finding.path)
+    original = next((c.absolute_path for c in candidates if c.project_path == finding.path), None)
+    try:
+        use_original = original is not None and not item.generated and os.stat(original).st_size == item.size_bytes
+    except OSError:
+        use_original = False
+    staged = stage_dir(stage.inventory_key, stage.group_id, stage.id).joinpath(*PurePosixPath(finding.path).parts)
+    target = original if use_original else str(staged)
+    code = (which or shutil.which)("code")
+    if not code:
+        raise PublishRefused("VS Code's `code` command was not found on PATH. Nothing was opened.")
+    # On Windows `code` is a batch script, where these characters would be interpreted by the shell.
+    if code.casefold().endswith((".cmd", ".bat")) and re.search(r'[&|<>^%!"()]', target):
+        raise PublishRefused("This file's path has characters that can't be passed safely to VS Code. Nothing was opened.")
+    if run([code, "--goto", f"{target}:{finding.line or 1}"], None).code != 0:
+        raise PublishRefused("VS Code could not open the file.")
+    return "your original file" if use_original else "the staged copy"
+
+
 def verify_tree(stage: Stage) -> None:
     """The staging folder must hold exactly the staged bytes, and nothing else."""
-    if _digest(stage.repo_name, stage.visibility, stage.ownership, stage.course_policy, stage.license, stage.attribution,
+    if _digest(stage.repo_name, stage.visibility, stage.ownership, stage.coursework, stage.license, stage.attribution,
                stage.attribution_concerns, stage.files) != stage.digest:
         raise PublishRefused("The stage record changed after it was created. Stage again.")
     root = stage_dir(stage.inventory_key, stage.group_id, stage.id)
@@ -593,6 +675,10 @@ def load_stage(inventory_key: str, group_id: str, stage_id: str) -> Stage:
     if not path.is_file():
         raise PublishRefused("No such stage.")
     d = json.loads(path.read_text(encoding="utf-8"))
+    # Stages made before course policies were removed still load, so their reasons stay readable.
+    # Their digest no longer matches, so they can't be published.
+    legacy = d.pop("course_policy", None)
+    d.setdefault("coursework", legacy not in (None, "not-coursework"))
     return Stage(**{**d, "files": tuple(StagedFile(**f) for f in d["files"]),
                     "attribution_concerns": tuple(d["attribution_concerns"]), "resolutions": dict(d["resolutions"])})
 
@@ -619,7 +705,7 @@ def format_preview(stage: Stage, findings: Sequence[Finding], *, owner: str | No
              f"  Repository:  {'[hidden]' if redact_names else target} ({availability})",
              f"  Visibility:  {stage.visibility.upper()}",
              f"  Ownership:   {stage.ownership or 'NOT CONFIRMED'}",
-             f"  Course:      {stage.course_policy or 'NOT CONFIRMED'}",
+             f"  Coursework:  {'yes (recorded as history)' if stage.coursework else 'no'}",
              f"  License:     {stage.license or 'NOT CHOSEN'}",
              f"  Files:       {len(stage.files)}"]
     if committer and not redact_names:
