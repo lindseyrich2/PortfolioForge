@@ -170,3 +170,23 @@ def test_real_sdk_transport_failure_reports_whether_anything_was_sent(world, sdk
     text = str(excinfo.value)
     assert "network transport" in text or "TypeError" in text
     assert "may have been sent" in text  # the request hook fired before the transport failed
+
+
+def test_the_real_sdk_never_retries_by_itself(world, monkeypatch):
+    """A retry after a timeout or server error could be processed and charged twice."""
+    anthropic = pytest.importorskip("anthropic")
+    httpx2 = pytest.importorskip("httpx2")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy-offline-key")
+    pack, _, _ = _pack(world)
+    manifest, payload = build_manifest(pack, "anthropic", "claude-sonnet-5-5")
+    requests = []
+
+    def server_error(request):
+        requests.append(request)
+        return httpx2.Response(500, json={"type": "error", "error": {"type": "api_error", "message": "boom"}})
+
+    provider = AnthropicProvider("claude-sonnet-5-5", transport=httpx2.MockTransport(server_error))
+    with pytest.raises(ProviderRequestFailed):
+        submit(manifest, payload, approve_manifest(manifest), provider)
+    assert len(requests) == 1
+    assert anthropic is not None

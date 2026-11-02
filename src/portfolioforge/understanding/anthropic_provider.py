@@ -267,7 +267,9 @@ class AnthropicProvider:
         anthropic = _import_sdk()
         key = os.environ.get(API_KEY_ENV)
         http_client = anthropic.DefaultHttpxClient(event_hooks=tracker.hooks(), **self._transport_kwargs())
-        kwargs: dict[str, Any] = {"http_client": http_client}
+        # No automatic retries: after a timeout or server error, the request may already have been
+        # processed and charged. Whether to send it again is the user's decision.
+        kwargs: dict[str, Any] = {"http_client": http_client, "max_retries": 0}
         if key:
             kwargs["api_key"] = key
         return anthropic.Anthropic(**kwargs)
