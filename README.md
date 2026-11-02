@@ -18,9 +18,9 @@ Past projects, especially academic ones, tend to be scattered: course folders on
 | AI analysis of code, notebooks and documents | 🗓️ Planned |
 | Google Drive and Google Colab sources | 🗓️ Planned |
 | Documentation generation | 🗓️ Planned |
-| Publishing to GitHub (after approval) | 🗓️ Planned |
+| **Publishing to GitHub** (one new repository per project, after checks and typed approval; private by default) | ✅ Implemented, opt-in |
 
-Nothing in PortfolioForge contacts an AI model or any other service unless you explicitly approve a disclosure manifest and then confirm sending it. Nothing is ever published.
+Nothing in PortfolioForge contacts an AI model unless you explicitly approve a disclosure manifest and then confirm sending it. Nothing is published unless you approve that exact publication, by typing it.
 
 ## Local file inventory
 
@@ -435,6 +435,33 @@ When the excerpts aren't enough to tell how to run or test the project, the prop
 
 **Live tests are opt-in.** `PORTFOLIOFORGE_RUN_NETWORK_TESTS=1 pytest -m network` sends a tiny *synthetic* evidence pack to Anthropic. All other tests use mocked responses and block network access.
 
+## Publishing to GitHub
+
+This stage publishes one accepted project to its own new repository, using your existing GitHub CLI login. It works the same for any language.
+
+```powershell
+python -m portfolioforge.publishing candidates <GROUP>     # files you may select; nothing is selected by default
+python -m portfolioforge.publishing stage <GROUP> <PROPOSAL> --file <ID> --file <ID> --ownership mine --course-policy not-coursework --license none
+python -m portfolioforge.publishing preview <GROUP> <STAGE>   # the exact files, name, visibility, README and provenance
+python -m portfolioforge.publishing resolve <GROUP> <STAGE> <FINDING> --reason "..."   # accept one finding, if it is safe
+python -m portfolioforge.publishing approve <GROUP> <STAGE>   # no --yes: you always type it
+python -m portfolioforge.publishing publish <GROUP> <STAGE>
+```
+
+- **Only what you name is included.** Selected files are copied unchanged into a staging folder in your data folder, outside any repository, through the same guarded reader as every other stage. `README.md` and `PROVENANCE.md` are generated there. Credential-looking files and private folders can't be selected.
+- **High-risk findings block publication.** The checks run on the staged bytes and cover privacy, sensitive data, ownership, third-party attribution and licensing. Anything that could identify a person (including author lines and identifiers in file paths) blocks, and so does anything that can't be scanned, such as a PDF or a notebook's saved outputs. Real secrets (private keys, access tokens) can only be fixed. Other findings, such as a false alarm, can be accepted one at a time with a recorded reason. Ownership, course policy and a license choice must be stated.
+- **Private by default.** `--visibility public` is a separate choice, and approving it needs a different typed phrase.
+- **Existing repositories are never touched.** The name is checked at preview and again just before publishing. Only a clear "not found" counts as free, and the workflow only ever creates a new repository. GitHub is told only the name until you publish.
+- **Approval is single-use.** It covers that exact stage, name, visibility and GitHub account. Before uploading, every file's hash and all the checks run again, and the commit itself must hold exactly the approved bytes. Approval can't be given with `--redact`.
+
+Your git name and email go into the commit. A public repository makes them public, so an email that isn't a GitHub noreply address blocks public publication until you change it or accept it.
+
+**Limitations:**
+- **The checks are pattern-based,** so they can miss things, such as a person's name in a file name. The preview is your final check.
+- **Publishing can't be undone by PortfolioForge.** Treat anything published publicly as permanently exposed, even if you delete the repository later.
+- **If the upload fails after the repository was created,** an empty repository may remain, and you'd need to delete it yourself before retrying that name.
+- **Editing the README** means changing the proposal before accepting it; the staged README can't be edited.
+
 ## Privacy and your data
 
 PortfolioForge works with the names and locations of your personal files, so it is built to keep that information on your computer.
@@ -568,6 +595,7 @@ PortfolioForge/
 │   │   ├── validation.py           # the only code that runs a project; approval-gated
 │   │   ├── findings.py             # local findings into proposals and new manifests
 │   │   └── store.py, models.py, cli.py
+│   ├── publishing/                 # staging, blocking checks, approval and GitHub CLI upload
 │   ├── grouping/                   # metadata-only candidate grouping (python -m portfolioforge.grouping)
 │   │   ├── features.py, index.py   # name features; folder tree from the saved inventory
 │   │   ├── segment.py, clustering.py   # course → assignment/project hierarchy; loose-file splitting

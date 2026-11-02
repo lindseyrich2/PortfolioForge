@@ -12,12 +12,10 @@ Status: **approved design, mostly implemented.**
   - local proposal review: edit and accept, with a local check that a chosen name isn't already in use
   - local build-and-run inspection, with a separate approval for build files and pluggable inspectors (Java only so far)
   - optional local validation on a temporary copy (see below)
+  - publishing to a new repository (`portfolioforge.publishing`), with `PROVENANCE.md`, blocking checks and a name collision check
 - **Not implemented:**
-  - provenance records and `PROVENANCE.md`
-  - checking your existing GitHub repository names for collisions (opt-in)
   - sandboxed validation (see below)
-  - a publisher, which must block on unresolved inspection findings
-  - publishing
+  - renaming files on publication (files keep their original names)
 
 Nothing is sent to a provider without both approvals and a final typed confirmation. Nothing is published.
 
