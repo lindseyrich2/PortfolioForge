@@ -613,7 +613,7 @@ python -m portfolioforge.batch resume                                # after an 
 - **You can set projects aside at any point** with `exclude` (for unrelated work or a duplicate) or `defer`, and bring them back with `restore`. Nothing is read or sent for them.
 - **Every valid AI name suggestion is shown in the review.** The first is the visible default, and you can choose another.
 - **Publishing is private only, under one approval of an exact list.** `batch publish` shows every repository in scope, then asks once. Each stage still gets its own recorded approval and full checks. A project that can't be published safely is deferred, a taken name is never overwritten, and the rest continue. You get one report, and making anything public is a separate decision.
-- **Project READMEs are about the project,** covering its purpose, technologies, setup and evidence-supported results, plus any attribution. PortfolioForge appears only in a one-line footnote.
+- **Project READMEs are about the project,** covering its purpose, technologies, setup and evidence-supported results, plus any attribution. They never mention PortfolioForge.
 - **Program output stays out of the batch output,** and stays in a redacted local record.
 - **Sensitive findings use the existing commands:** `python -m portfolioforge.publishing review`, `open-finding` and `resolve`.
 
