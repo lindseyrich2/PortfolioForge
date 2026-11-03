@@ -31,6 +31,8 @@ import sys
 from argparse import Namespace
 from typing import Callable, Sequence
 
+from ..drive import hydrate
+from ..drive.auth import DriveError
 from ..grouping.cli import UsageError, _propose
 from ..grouping.models import GroupStatus
 from ..grouping.review import append_decision, decisions_path
@@ -123,7 +125,7 @@ def main(argv: Sequence[str] | None = None, *, input_fn: Input = input) -> int:
     try:
         return _run(args, input_fn)
     except (UsageError, ApprovalError, ProposalError, pw.PublishRefused, ValidationRefused, ValidationUnavailable,
-            DisclosureNotApproved, ProviderNotConfigured) as exc:
+            DisclosureNotApproved, ProviderNotConfigured, DriveError) as exc:
         print(f"error: {exc}", file=sys.stderr)  # these messages never contain paths
         return EXIT_ERROR
     except (ValueError, OSError, PrivacyConfigError) as exc:
@@ -277,6 +279,8 @@ def _approve_read(args: argparse.Namespace, ctx: bw.Context, queue: bw.Queue, in
             if ctx.eligibility[g].status is EligibilityStatus.NEEDS_REVIEW and not args.acknowledge_review]
     if held:
         raise UsageError("These are marked needs_review; check them, then add --acknowledge-review: " + ", ".join(held))
+    hydrate.require_download_permission(ctx.inventory)
+    to_read: list[str] = []
     for group_id in args.groups:
         group = ctx.run.group(group_id)
         selection = propose_selection(group, ctx.inventory, ctx.privacy)
@@ -287,10 +291,15 @@ def _approve_read(args: argparse.Namespace, ctx: bw.Context, queue: bw.Queue, in
             print(f"  {path}")
         print(f"  {len(selection.selected)} source file(s), {len(build.candidates)} build file(s); "
               f"{len(selection.excluded)} excluded")
-    print("\nThese files would be read on this computer only. Nothing is sent, run or changed.")
-    if not _ask(input_fn, f"read {len(args.groups)}"):
+        for concern in queue.jobs[group_id].concerns:
+            print(f"  Duplicate: {concern}")
+        to_read += [*(s.file_id for s in selection.selected), *(c.file_id for c in build.candidates)]
+    from_drive = hydrate.is_drive_inventory(ctx.inventory)
+    print("\n" + (hydrate.READ_NOTICE if from_drive else "These files would be read on this computer only. Nothing is sent, run or changed."))
+    if not _ask(input_fn, f"{'download' if from_drive else 'read'} {len(args.groups)}"):
         print("Not approved. Nothing was read.")
         return EXIT_ERROR
+    hydrate.download_approved(ctx.inventory, ctx.key, to_read)  # first: a failure here leaves nothing approved
     unaccepted = [g for g in args.groups if ctx.run.group(g).status is not GroupStatus.ACCEPTED]
     for group_id in unaccepted:
         append_decision(decisions_path(ctx.key), "accept", (group_id,))

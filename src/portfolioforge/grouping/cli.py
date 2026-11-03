@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from ..data import stored_inventories
+from ..data import LATEST_DRIVE, latest_finished, stored_inventories
 from ..inventory.cli import format_error
 from ..inventory.models import Inventory
 from ..inventory.sinks import REPORT_NAME, load_inventory
@@ -99,11 +99,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def resolve_inventory(ref: str) -> tuple[str, Inventory]:
-    if ref == "latest":
-        finished = [i for i in stored_inventories() if i.report is not None]
-        if not finished:
+    if ref in ("latest", LATEST_DRIVE):
+        item = latest_finished(stored_inventories(), drive=ref == LATEST_DRIVE)
+        if item is None:
             raise UsageError("No saved inventory found. Run an inventory scan first.")
-        item = finished[-1]
         return item.id, load_inventory(item.path)
     candidate = inventories_dir() / ref
     if os.sep not in ref and "/" not in ref and (candidate / REPORT_NAME).is_file():

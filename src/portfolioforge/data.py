@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 from collections import Counter
 from dataclasses import dataclass
@@ -23,14 +24,18 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Sequence
 
-from .paths import config_dir, data_dir, inventories_dir
+from .paths import config_dir, data_dir, drive_cache_dir, inventories_dir
 from .privacy import default_privacy_file
 
 EXIT_OK = 0
 EXIT_ERROR = 1
 
 #: The only files an inventory folder may contain (see inventory.sinks).
-_INVENTORY_FILES = frozenset({"files.jsonl", "directories.jsonl", "skipped.jsonl", "report.json", "plan.json"})
+_INVENTORY_FILES = frozenset({"files.jsonl", "directories.jsonl", "skipped.jsonl", "report.json", "plan.json",
+                              "drive-files.jsonl"})
+#: Inventories of Google Drive, which "latest" leaves out so a Drive scan never takes over local work.
+GOOGLE_DRIVE_MODE = "google_drive"
+LATEST_DRIVE = "latest-drive"
 
 
 @dataclass(frozen=True)
@@ -72,6 +77,12 @@ def stored_inventories(base: Path | None = None) -> list[StoredInventory]:
             )
             found.append(StoredInventory(entry.name, path, report, size))
     return sorted(found, key=lambda s: s.id)
+
+
+def latest_finished(items: list[StoredInventory], *, drive: bool = False) -> StoredInventory | None:
+    """The newest finished inventory: of Google Drive with ``drive``, otherwise of local files."""
+    finished = [i for i in items if i.report is not None and (i.report.get("mode") == GOOGLE_DRIVE_MODE) == drive]
+    return finished[-1] if finished else None
 
 
 def format_list(items: list[StoredInventory]) -> str:
@@ -131,9 +142,8 @@ def _mb(size: int) -> str:
 
 
 def _resolve(items: list[StoredInventory], ref: str) -> StoredInventory | None:
-    if ref == "latest":
-        finished = [i for i in items if i.report is not None]
-        return finished[-1] if finished else None
+    if ref in ("latest", LATEST_DRIVE):
+        return latest_finished(items, drive=ref == LATEST_DRIVE)
     return next((i for i in items if i.id == ref), None)
 
 
@@ -153,6 +163,9 @@ def purge_inventory(item: StoredInventory, base: Path) -> None:
     for entry in entries:
         os.remove(entry.path)
     os.rmdir(path)
+    cache = drive_cache_dir() / item.id  # copies of downloaded Drive files belong to their inventory
+    if cache.is_dir() and not cache.is_symlink():
+        shutil.rmtree(cache)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -190,6 +203,7 @@ def _run(parser: argparse.ArgumentParser, args: argparse.Namespace, input_fn: Ca
     if args.command == "where":
         print(f"Data folder:        {data_dir()}")
         print(f"Inventories:        {base}")
+        print(f"Drive downloads:    {drive_cache_dir()}")
         print(f"Settings folder:    {config_dir()}")
         print(f"Privacy settings:   {default_privacy_file()}")
         print("These folders contain personal file names and paths. Keep them private.")
