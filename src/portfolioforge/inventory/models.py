@@ -28,6 +28,7 @@ SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2})
 class ScanMode(StrEnum):
     TARGETED = "targeted"
     FULL_COMPUTER = "full_computer"
+    GOOGLE_DRIVE = "google_drive"
 
 
 class RootOrigin(StrEnum):
@@ -37,6 +38,7 @@ class RootOrigin(StrEnum):
     DRIVE_TOP_LEVEL = "drive_top_level"
     ADDITIONAL_DRIVE = "additional_drive"
     OTHER_PROFILE = "other_profile"
+    GOOGLE_DRIVE = "google_drive"
 
 
 class EntryKind(StrEnum):
@@ -55,6 +57,7 @@ class SkipReason(StrEnum):
     CLOUD_ONLY = "cloud_only"
     OTHER_PROFILE = "other_profile"
     OUTPUT_DIR = "output_dir"
+    NOT_OWNED = "not_owned"
     # default tier
     HIDDEN = "hidden"
     SYSTEM = "system"

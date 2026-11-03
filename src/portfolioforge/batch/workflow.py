@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from ..devtools.privacy_check import local_identity_terms
+from ..drive.duplicates import load_concerns
 from ..grouping.cli import _propose, resolve_inventory
 from ..grouping.models import FlagKind, GroupingRun, GroupKind
 from ..grouping.store import load_run
@@ -154,8 +155,8 @@ def _priority(ctx: Context, group) -> int:
     return status * 10_000 + kind * 1_000 + min(e.code_files + e.notebook_files, 999)
 
 
-def _concerns(ctx: Context, group_id: str) -> list[str]:
-    concerns = []
+def _concerns(ctx: Context, group_id: str, other_source: dict[str, list[str]]) -> list[str]:
+    concerns = list(other_source.get(group_id, ()))
     for flag in ctx.run.flags:
         if flag.target == group_id and flag.kind is FlagKind.POSSIBLE_DUPLICATE:
             concerns.append("possible duplicate")
@@ -169,11 +170,12 @@ def _concerns(ctx: Context, group_id: str) -> list[str]:
 def sync_queue(ctx: Context, queue: Queue) -> None:
     """Add new candidates and refresh their order. Existing checkpoints are kept."""
     current = {g.id: g for g in ctx.run.groups}
+    other_source = load_concerns(ctx.key)
     for group in current.values():
         job = queue.jobs.setdefault(group.id, Job(group.id))
         job.title = group.user_title or group.working_title.text
         job.priority = _priority(ctx, group)
-        job.concerns = _concerns(ctx, group.id)
+        job.concerns = _concerns(ctx, group.id, other_source)
     for job in queue.jobs.values():
         if job.group_id not in current:
             job.state, job.detail = "gone", ""

@@ -40,6 +40,8 @@ from datetime import UTC, datetime
 from typing import Callable, Sequence
 
 from ..devtools.privacy_check import local_identity_terms
+from ..drive import hydrate
+from ..drive.auth import DriveError
 from ..grouping.cli import UsageError, resolve_inventory
 from ..grouping.models import GroupingRun
 from ..grouping.store import load_run
@@ -216,7 +218,7 @@ def main(argv: Sequence[str] | None = None, *, input_fn: Callable[[str], str] = 
     try:
         return _run(args, input_fn)
     except (UsageError, ApprovalError, DisclosureNotApproved, ProviderNotConfigured, ProposalError,
-            ValidationRefused, ValidationUnavailable) as exc:
+            ValidationRefused, ValidationUnavailable, DriveError) as exc:
         print(f"error: {exc}", file=sys.stderr)  # these messages never contain paths
         return EXIT_ERROR
     except (ValueError, OSError, PrivacyConfigError) as exc:
@@ -541,9 +543,13 @@ def _run(args: argparse.Namespace, input_fn: Callable[[str], str]) -> int:
                                inventory=inventory, file_ids=args.files, acknowledge_review=args.acknowledge_review)
         prompt = (f"PortfolioForge will read {len(record.files)} file(s) of {_title(group, args.redact)} on this "
                   "computer to extract evidence. Nothing is sent anywhere, and the files are not changed.")
+        hydrate.require_download_permission(inventory)
+        if hydrate.is_drive_inventory(inventory):
+            prompt += " " + hydrate.READ_NOTICE
         if not _confirm(prompt, "approve", args, input_fn):
             print("Not approved. Nothing was read.")
             return EXIT_ERROR
+        hydrate.download_approved(inventory, key, [f.file_id for f in record.files])
         save_file_approval(record)
         print(f"Approved {len(record.files)} file(s) for local reading: {record.id}")
         return EXIT_OK
@@ -574,9 +580,13 @@ def _run(args: argparse.Namespace, input_fn: Callable[[str], str]) -> int:
                                      file_ids=args.files, acknowledge_review=args.acknowledge_review)
         prompt = (f"PortfolioForge will read {len(record.files)} build configuration file(s) of "
                   f"{_title(group, args.redact)} on this computer. Nothing is run or sent, and the files are not changed.")
+        hydrate.require_download_permission(inventory)
+        if hydrate.is_drive_inventory(inventory):
+            prompt += " " + hydrate.READ_NOTICE
         if not _confirm(prompt, "approve", args, input_fn):
             print("Not approved. Nothing was read.")
             return EXIT_ERROR
+        hydrate.download_approved(inventory, key, [f.file_id for f in record.files])
         save_build_approval(record)
         print(f"Approved {len(record.files)} build file(s) for local reading: {record.id}")
         return EXIT_OK

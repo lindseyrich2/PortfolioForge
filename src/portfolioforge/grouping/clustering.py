@@ -156,11 +156,15 @@ def cluster_loose_files(folder: Folder, parent_id: str | None, config: GroupingC
     builders: list[GroupBuilder] = []
     leftovers: list[int] = []
     folder_ev = Evidence("loose_in_folder", 1.0, f"loose files in '{folder.name}'", (folder.id,))
+    standalone = folder.name.casefold() in config.standalone_notebook_folders
     for root, members in sorted(components.items(), key=lambda kv: min(items[m].record.relative_path for m in kv[1])):
         marker_items = [items[m] for m in members if items[m].marker]
         numbered = [i for i in marker_items if i.marker and i.marker.number]
         if len(members) == 1 and not numbered:
-            leftovers.extend(members)
+            if standalone and items[members[0]].record.category.value == "notebook":
+                builders.append(_standalone_notebook(folder, items[members[0]], parent_id, course_hints))
+            else:
+                leftovers.extend(members)
             continue
         key = numbered[0].marker.key if numbered else None  # type: ignore[union-attr]
         seed = key or min(items[m].base for m in members)
@@ -194,6 +198,17 @@ def cluster_loose_files(folder: Folder, parent_id: str | None, config: GroupingC
             loose.add(items[m].record, [Evidence("loose_in_folder", 0.5, "only shares a folder", (folder.id,))])
         builders.append(loose)
     return builders
+
+
+def _standalone_notebook(folder: Folder, item: _Item, parent_id: str | None, course_hints: tuple[str, ...]) -> GroupBuilder:
+    from .segment import GroupBuilder  # avoid an import cycle
+
+    evidence = Evidence("standalone_notebook", 2.0, f"a notebook on its own in '{folder.name}'", (item.record.id,))
+    builder = GroupBuilder(id=stable_id("g", "notebook", folder.id, item.record.id), kind=GroupKind.PROJECT,
+                           title=item.record.stem, anchor=folder.id, parent_id=parent_id, evidence=[evidence],
+                           course_hints=course_hints)
+    builder.add(item.record, [evidence])
+    return builder
 
 
 def _common_title(items: list[_Item], members: list[int]) -> str:

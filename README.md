@@ -16,7 +16,7 @@ Past projects, especially academic ones, tend to be scattered: course folders on
 | **Local build-and-run inspection** (separately approved; Java is the only project type with an inspector) | ✅ Implemented |
 | **Optional local validation** (compile or run on a temporary copy, each approved separately; not a sandbox) | ✅ Implemented, opt-in; runs nothing without your typed approval |
 | AI analysis of code, notebooks and documents | 🗓️ Planned |
-| Google Drive and Google Colab sources | 🗓️ Planned |
+| **Google Drive and Google Colab discovery** (read-only; contents downloaded only after typed approval) | ✅ Implemented, opt-in |
 | Documentation generation | 🗓️ Planned |
 | **Publishing to GitHub** (one new repository per project, after checks and typed approval; private by default) | ✅ Implemented, opt-in |
 | **Batch processing** (many projects, one consolidated review; private only) | ✅ Implemented, opt-in |
@@ -467,6 +467,64 @@ Your git name and email go into the commit. A public repository makes them publi
 - **If the upload fails after the repository was created,** an empty repository may remain, and you'd need to delete it yourself before retrying that name.
 - **Editing the README** means changing the proposal before accepting it; the staged README can't be edited.
 
+## Google Drive and Google Colab discovery
+
+Colab keeps notebooks in Google Drive as ordinary Drive files, and they're found by Drive's file API, so one read-only Drive integration covers both. Notebooks you only keep on GitHub, or never saved to Drive, aren't found. A Drive scan produces a normal inventory, so grouping, the batch workflow and every approval work as they do for local files.
+
+**Two separate permissions, both read-only:**
+
+| | Google permission | What it allows | Asked for by |
+|---|---|---|---|
+| Discovery | `drive.metadata.readonly` | Names, sizes, dates and checksums. It can't download file contents. | `connect` |
+| Approved downloads | `drive.readonly` | Downloading file contents. PortfolioForge uses it only for files you approve. | `connect --content` |
+
+Each has its own token, and a sign-in that grants anything other than the one permission asked for is discarded. You can do all your discovery and duplicate checks without ever granting the second one. Neither permission can change your Drive, and PortfolioForge's Drive client can only issue read requests. `drive.file` isn't used because it only sees files you pick one by one, so it can't discover anything.
+
+**Setting up (once).** PortfolioForge ships no shared Google credentials, so you use your own free Google Cloud project: create a project, enable the Drive API, configure the OAuth consent screen with yourself as a test user, add the two scopes above, and create an OAuth client of type *Desktop app*. Download its JSON file, then:
+
+```powershell
+python -m portfolioforge.drive connect --client-file <downloaded file>   # discovery permission only
+```
+
+While a Google Cloud project is in "Testing" status, Google expires its sign-ins after 7 days; run `connect` again when asked.
+
+**Finding projects:**
+
+```powershell
+python -m portfolioforge.drive scan --colab-only                # notebooks, and the folders that lead to them
+python -m portfolioforge.drive scan --folder "Coursework"       # one top-level folder (or a folder's ID); repeatable
+python -m portfolioforge.drive scan                             # all of My Drive; asks first
+python -m portfolioforge.drive scan --plan-only                 # show the plan, and stop
+python -m portfolioforge.drive duplicates                       # compare with a local inventory again
+python -m portfolioforge.drive status                           # which permissions are held
+python -m portfolioforge.drive disconnect --revoke              # delete the sign-ins, and cancel them at Google
+```
+
+**Then the normal workflow:**
+
+```powershell
+python -m portfolioforge.batch --inventory latest-drive run --provider anthropic
+python -m portfolioforge.batch --inventory latest-drive review
+python -m portfolioforge.drive connect --content                # before your first approved download
+python -m portfolioforge.batch --inventory latest-drive approve-read <GROUP> ...
+```
+
+`latest` always means your latest *local* inventory, so a Drive scan never takes over local work in progress. Use `latest-drive` or the inventory's ID.
+
+- **The same rules as a local scan.** Credential and private folders (including your `privacy.toml` names), sensitive file names, shortcuts, environments, caches and build output are skipped, and sensitive and private names are redacted. Trashed items, shared drives and items you don't own are left out; `--include-shared` adds what's been shared with you.
+- **Nothing is downloaded by a scan.** A file's contents are fetched only after you type the `download N` confirmation at `approve-read`, and only the files listed there. They go to a private cache in your data folder, and a file that changed after discovery isn't kept. `python -m portfolioforge.data purge` removes an inventory's downloads with it.
+- **Sending stays a separate decision.** A download goes no further than your computer. Anything sent to Anthropic still needs you to approve that exact disclosure and type the `send` confirmation. Code is only run through approved validation, and nothing is published without its own typed approval.
+- **Duplicates are suggestions.** A scan compares against your latest local inventory (`--compare-with` to choose another, `none` to skip) using names, paths and sizes, without opening any local file. Colab rewrites notebooks when saving, so the same distinctive notebook name at a different size counts as a possible variant. Matches appear in both batches' reviews and at `approve-read`; nothing is hidden or removed, and `exclude` sets a project aside. Text files copied between Windows and other systems can differ in size from line endings, so those show up as variants rather than duplicates.
+- **Each notebook in a `Colab Notebooks` folder is its own candidate,** unless its name links it to another. The folder names are configurable as `standalone_notebook_folders` in `grouping.toml`.
+
+**Limitations:**
+- **Google Docs, Sheets and Slides aren't read.** They have no file to download, so they're counted in the scan summary but not inventoried.
+- **Scanning all of My Drive, or using `--colab-only`, fetches all your Drive's metadata,** because Drive can't reliably filter by these rules itself. Only what passes them is saved. `--folder` lists only that folder's tree, and never lists inside a private folder.
+- **`private_paths` in `privacy.toml` are local paths,** so they don't apply to Drive. Use folder names, or `--exclude NAME`.
+- **A private folder you don't own can't be recognized.** Your own file inside someone else's folder appears under an `Other location` folder, because the parent's name isn't visible.
+- **Publishing from Drive covers the files you approved for reading.** To publish other files of a Drive project, approve them first.
+- **Checksums aren't compared against local files,** since that would mean opening them; duplicates rely on names, paths and sizes.
+
 ## Batch processing
 
 This runs the stages above across all your candidate projects, so decisions are made together instead of project by project. It adds no new way to read, send, run or publish anything: each step goes through the same gates.
@@ -495,7 +553,7 @@ python -m portfolioforge.batch resume                                # after an 
 - **Sensitive findings use the existing commands:** `python -m portfolioforge.publishing review`, `open-finding` and `resolve`.
 
 **Limitations:**
-- **Scanning isn't included.** Run the inventory scan first; `run` works from the latest inventory and its grouping.
+- **Scanning isn't included.** Run the inventory scan or [Drive scan](#google-drive-and-google-colab-discovery) first; `run` works from the latest local inventory and its grouping, or the one you name with `--inventory`.
 - **Only one batch command should run at a time.** There is no lock between terminals.
 - **Only a provider refusal that shows the request was never accepted (such as HTTP 400 or 429) lets a project be sent normally again.** The provider's own usage page is the final word on charges.
 - **Staging uses the files you approved for reading.** To publish fewer, or data files, use `python -m portfolioforge.publishing stage` for that project.
@@ -519,7 +577,7 @@ PortfolioForge works with the names and locations of your personal files, so it 
 These are enforced by the code and checked by automated tests:
 
 - **It never opens your files.** No file contents are read, executed, modified, moved or deleted; only directory listings are used. Tests run a full scan with file opening, writing, running programs and network connections all made to fail.
-- **Nothing leaves your computer without your approval.** There's no telemetry and no cloud connection, and cloud-only placeholders are never downloaded. The only network call PortfolioForge can make is the optional Anthropic request, which needs file approval, approval of the exact payload for that provider and model, and a typed `send` confirmation.
+- **Nothing leaves your computer without your approval.** There's no telemetry, and cloud-only placeholders are never downloaded. The Anthropic request needs file approval, approval of the exact payload for that provider and model, and a typed `send` confirmation. Publishing needs its own approval. The optional Google Drive connection is read-only, runs only when you ask for it, and sends no project content to Google; its results stay on your computer.
 - **Results stay out of Git.** Results are written only to your data folder; PortfolioForge refuses any output folder inside a Git repository, and `.gitignore` also blocks `*.jsonl` and the results folders.
 - **Sensitive names are never recorded.** Credential-looking files are skipped, and their names are redacted from every result.
 - **Private folders are skipped entirely** (see below).
@@ -586,7 +644,7 @@ Tests and documentation must use synthetic, generic data only, such as `C:\Users
 
 ## Roadmap
 
-1. **Discover**: inventory local files *(implemented)*, then Google Drive and Google Colab.
+1. **Discover**: inventory local files and Google Drive, including Colab notebooks *(implemented)*.
 2. **Group**: work out which files belong together, including files spread across folders.
 3. **Analyze**: work out what each project does, what technologies it uses, and how complete it is.
 4. **Document**: generate a README, summary, setup instructions and highlights for each project.
@@ -636,6 +694,12 @@ PortfolioForge/
 │   │   └── store.py, models.py, cli.py
 │   ├── publishing/                 # staging, blocking checks, approval and GitHub CLI upload
 │   ├── batch/                      # job queue and consolidated review over the stages above
+│   ├── drive/                      # read-only Google Drive and Colab discovery (python -m portfolioforge.drive)
+│   │   ├── auth.py, client.py      # two read-only permissions; a client that can only issue GET requests
+│   │   ├── discovery.py            # Drive metadata into a normal inventory, under the local scanner's rules
+│   │   ├── hydrate.py              # downloads approved files to a private cache, after typed approval
+│   │   ├── duplicates.py           # possible duplicates between Drive and local inventories
+│   │   └── cli.py
 │   ├── grouping/                   # metadata-only candidate grouping (python -m portfolioforge.grouping)
 │   │   ├── features.py, index.py   # name features; folder tree from the saved inventory
 │   │   ├── segment.py, clustering.py   # course → assignment/project hierarchy; loose-file splitting

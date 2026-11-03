@@ -62,6 +62,11 @@ def inventories_dir() -> Path:
     return data_dir() / "inventories"
 
 
+def drive_cache_dir() -> Path:
+    """Copies of Google Drive files you approved for reading. Holds file contents, unlike inventories."""
+    return data_dir() / "drive-cache"
+
+
 def find_git_work_tree(path: str | os.PathLike[str]) -> Path | None:
     """The Git working tree containing ``path`` (existing or not), if any.
 

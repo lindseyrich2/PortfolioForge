@@ -121,6 +121,9 @@ class GroupingConfig:
         "homework", "labs", "notebooks", "colab notebooks",
     })
     """Folders that collect unrelated work. They never become a project themselves."""
+    standalone_notebook_folders: frozenset[str] = frozenset({"colab notebooks"})
+    """Folders where each notebook is its own piece of work: Colab saves every new notebook into one such
+    folder. A notebook there with no name link to another is a candidate on its own, not a loose file."""
     structural_names: frozenset[str] = frozenset({
         "src", "source", "lib", "include", "data", "dataset", "datasets", "docs", "doc", "notebooks",
         "models", "model", "utils", "util", "helpers", "tests", "test", "scripts", "figures", "figs",
@@ -175,7 +178,7 @@ def default_grouping_file() -> Path:
     return config_dir() / GROUPING_FILE_NAME
 
 
-_VOCAB_KEYS = {"assignment_words", "collection_words", "container_names", "structural_names",
+_VOCAB_KEYS = {"assignment_words", "collection_words", "container_names", "standalone_notebook_folders", "structural_names",
                "stopwords", "template_words", "known_third_party_names", "course_code_excluded_words"}
 _PATTERN_KEYS = {"course_code": "course_code_pattern", "term": "term_pattern"}
 
