@@ -16,7 +16,18 @@ from typing import TYPE_CHECKING, Iterable
 
 from ..devtools.privacy_check import _SECRET_PATTERNS
 from .models import SensitiveFinding
-from .redact import _AUTHOR_LINE, _EMAIL, _NAME_COMMENT, _PHONE, _POSIX_HOME, _UNC_PATH, _WINDOWS_PATH
+from .redact import (
+    _AUTHOR_LINE,
+    _CARD,
+    _EMAIL,
+    _NAME_COMMENT,
+    _PHONE,
+    _POSIX_HOME,
+    _SSN,
+    _UNC_PATH,
+    _WINDOWS_PATH,
+    is_card_number,
+)
 
 if TYPE_CHECKING:
     from .inspectors.base import ProjectInspector
@@ -39,8 +50,6 @@ _ASSIGNED_LITERAL = re.compile(
 )
 _PROPERTY_VALUE = re.compile(rf"(?i)^\s*[\w.-]*{_CREDENTIAL_WORDS}[\w.-]*\s*[=:]\s*(\S.*?)\s*$")
 _PRIVATE_IP = re.compile(r"(?<![\d.])(?:10\.\d{1,3}|192\.168|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}(?![\d.])")
-_SSN = re.compile(r"(?<![\d-])\d{3}-\d{2}-\d{4}(?![\d-])")
-_CARD = re.compile(r"(?<![\d-])\d(?:[ -]?\d){12,18}(?![\d-])")
 _STUDENT_ID = re.compile(
     r"(?i)\b\w*(?:student|employee|patient|member)[ _-]?(?:id|no|number|num)\b\s*[:=#]?\s*\"?\w*\d{4,}"
 )
@@ -77,16 +86,6 @@ _RULES: tuple[_Rule, ...] = tuple(
 )
 
 
-def _luhn(digits: str) -> bool:
-    total = 0
-    for index, char in enumerate(reversed(digits)):
-        value = int(char)
-        if index % 2:
-            value = value * 2 - 9 if value > 4 else value * 2
-        total += value
-    return total % 10 == 0
-
-
 def _is_placeholder(value: str) -> bool:
     folded = value.strip().casefold()
     return folded in _PLACEHOLDER_VALUES or folded.startswith(("${", "%", "<")) or set(folded) <= {"*", "x", "."}
@@ -102,7 +101,7 @@ def _line_findings(line: str, terms: list[re.Pattern[str]], is_config: bool) -> 
         match = _PROPERTY_VALUE.match(line)
         if match and not _is_placeholder(match.group(1)):
             yield "hardcoded_credential", "high", "a credential-like setting has a value"
-    if any(_luhn(re.sub(r"\D", "", m.group(0))) for m in _CARD.finditer(line)):
+    if any(is_card_number(m.group(0)) for m in _CARD.finditer(line)):
         yield "payment_card", "high", "looks like a payment card number"
     if _PERSON_LITERAL.search(line) and _PERSON_CONTEXT.search(_PERSON_LITERAL.sub("", line)):
         yield "person_name", "low", "a literal that looks like a person's name, possibly sample data"
