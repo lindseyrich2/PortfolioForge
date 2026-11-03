@@ -646,9 +646,9 @@ def test_duplicates_are_reported_both_ways_and_nothing_is_removed(cli, tmp_path,
 
 def test_a_missing_or_broken_comparison_is_not_an_error(homes):
     assert duplicates.load_concerns("nothing-here") == {}
-    path = duplicates._concerns_path("broken")
-    path.parent.mkdir(parents=True)
-    path.write_text("not json")
+    folder = duplicates._concerns_folder("broken")
+    folder.mkdir(parents=True)
+    (folder / "bad.json").write_text("not json")
     assert duplicates.load_concerns("broken") == {}
 
 

@@ -32,10 +32,10 @@ EXIT_ERROR = 1
 
 #: The only files an inventory folder may contain (see inventory.sinks).
 _INVENTORY_FILES = frozenset({"files.jsonl", "directories.jsonl", "skipped.jsonl", "report.json", "plan.json",
-                              "drive-files.jsonl"})
-#: Inventories of Google Drive, which "latest" leaves out so a Drive scan never takes over local work.
-GOOGLE_DRIVE_MODE = "google_drive"
-LATEST_DRIVE = "latest-drive"
+                              "drive-files.jsonl", "github-repos.json"})
+#: "latest" means local files, so a cloud scan never takes over local work. Each cloud source has its own name.
+LATEST_REFS = {"latest": None, "latest-drive": "google_drive", "latest-github": "github"}
+_CLOUD_MODES = frozenset(mode for mode in LATEST_REFS.values() if mode)
 
 
 @dataclass(frozen=True)
@@ -79,9 +79,11 @@ def stored_inventories(base: Path | None = None) -> list[StoredInventory]:
     return sorted(found, key=lambda s: s.id)
 
 
-def latest_finished(items: list[StoredInventory], *, drive: bool = False) -> StoredInventory | None:
-    """The newest finished inventory: of Google Drive with ``drive``, otherwise of local files."""
-    finished = [i for i in items if i.report is not None and (i.report.get("mode") == GOOGLE_DRIVE_MODE) == drive]
+def latest_finished(items: list[StoredInventory], ref: str = "latest") -> StoredInventory | None:
+    """The newest finished inventory that ``ref``, a key of ``LATEST_REFS``, stands for."""
+    wanted = LATEST_REFS[ref]
+    finished = [i for i in items if i.report is not None and
+                (i.report.get("mode") == wanted if wanted else i.report.get("mode") not in _CLOUD_MODES)]
     return finished[-1] if finished else None
 
 
@@ -142,8 +144,8 @@ def _mb(size: int) -> str:
 
 
 def _resolve(items: list[StoredInventory], ref: str) -> StoredInventory | None:
-    if ref in ("latest", LATEST_DRIVE):
-        return latest_finished(items, drive=ref == LATEST_DRIVE)
+    if ref in LATEST_REFS:
+        return latest_finished(items, ref)
     return next((i for i in items if i.id == ref), None)
 
 

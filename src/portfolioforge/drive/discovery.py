@@ -269,8 +269,10 @@ class _StopWalk(Exception):
 
 
 class _Builder:
-    def __init__(self, listing: Listing, options: DriveOptions, key: str, sink: InventorySink) -> None:
-        self.listing, self.options, self.key, self.sink = listing, options, key, sink
+    def __init__(self, listing: Listing, options: DriveOptions, key: str, sink: InventorySink, mode: ScanMode,
+                 locate: Callable[[DriveEntry, str, str], str] | None) -> None:
+        self.listing, self.options, self.key, self.sink, self.mode = listing, options, key, sink, mode
+        self.locate = locate or (lambda entry, relative, name: str(drive_cache_dir() / key / _short(entry.id) / name))
         self.refs: list[DriveFileRef] = []
         self.visited: set[str] = set()
         self.files = self.dirs = self.skipped = self.size = self.images = self.native = 0
@@ -441,7 +443,7 @@ class _Builder:
         record_id = _file_id(root.id, relative)
         self.sink.add_file(FileRecord(
             id=record_id, root_id=root.id, relative_path=relative,
-            absolute_path=str(drive_cache_dir() / self.key / _short(entry.id) / name),
+            absolute_path=self.locate(entry, relative, name),
             name=name, stem=os.path.splitext(name)[0], extension=extension, category=file_format.category,
             language=file_format.language, parent_dir="/".join(parts), path_parts=parts, depth=len(parts),
             size_bytes=entry.size, modified_at=entry.modified_at, created_at=entry.created_at, location_hint=root.label,
@@ -468,7 +470,7 @@ class _Builder:
             per_root={root_id: dict(sorted(c.items())) for root_id, c in self.per_root.items()},
         )
         return ScanReport(
-            schema_version=SCHEMA_VERSION, mode=ScanMode.GOOGLE_DRIVE, roots=tuple(t.root for t in self.listing.targets),
+            schema_version=SCHEMA_VERSION, mode=self.mode, roots=tuple(t.root for t in self.listing.targets),
             started_at=started_at, finished_at=datetime.now(UTC),
             complete=self.stop_reason is None and not self.limits_reached, stop_reason=self.stop_reason,
             limits_reached=tuple(sorted(self.limits_reached)), limits=self.options.limits,
@@ -486,16 +488,18 @@ class _Folder:
     unrecognized: Counter[str] = field(default_factory=Counter)
 
 
-def build_inventory_records(listing: Listing, options: DriveOptions, key: str, sink: InventorySink,
-                            started_at: datetime) -> Discovery:
+def build_inventory_records(listing: Listing, options: DriveOptions, key: str, sink: InventorySink, started_at: datetime,
+                            *, mode: ScanMode = ScanMode.GOOGLE_DRIVE,
+                            locate: Callable[[DriveEntry, str, str], str] | None = None) -> Discovery:
     """Send records to ``sink``. The caller closes it, after saving the refs, since a report marks a finished inventory."""
-    builder = _Builder(listing, options, key, sink)
+    builder = _Builder(listing, options, key, sink, mode, locate)
     builder.run()
     return Discovery(builder.report(started_at), tuple(builder.refs))
 
 
-def make_plan(targets: tuple[Target, ...], output_dir: str | os.PathLike[str]) -> ScanPlan:
-    return ScanPlan(mode=ScanMode.GOOGLE_DRIVE, roots=tuple(t.root for t in targets), excluded=(), optional=(),
+def make_plan(targets: tuple[Target, ...], output_dir: str | os.PathLike[str], *,
+              mode: ScanMode = ScanMode.GOOGLE_DRIVE) -> ScanPlan:
+    return ScanPlan(mode=mode, roots=tuple(t.root for t in targets), excluded=(), optional=(),
                     profile_dir=None, users_dirs=(), drive_roots=(), output_dir=str(output_dir))
 
 
