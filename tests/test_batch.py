@@ -699,8 +699,7 @@ def test_the_published_readme_is_about_the_project(batch):
     for group in groups:
         stage = bw.latest_stage(KEY, group)
         readme = (pw.stage_dir(KEY, group, stage.id) / "README.md").read_text(encoding="utf-8")
-        footnote = "_Documentation prepared with assistance from [PortfolioForge](https://github.com/lindseyrich2/PortfolioForge)._"
-        assert readme.rstrip().endswith(footnote) and "PortfolioForge" not in readme.replace(footnote, "")
+        assert "portfolioforge" not in readme.casefold() and "assistance from" not in readme
         assert "Draft generated" not in readme and "have **not** been run or tested" in readme
 
 
