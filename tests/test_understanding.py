@@ -42,6 +42,8 @@ from portfolioforge.understanding import (
     submit,
 )
 
+from portfolioforge.understanding.disclosure import format_manifest  # noqa: E402
+
 FAKE_HOME = "C:" + "\\Users\\" + "casey" + "wren"  # assembled so this file passes the privacy check
 FAKE_SECRET = "sk_" + "live_" + "A1b2C3d4E5f6G7h8"
 KEY_NAME = "api" + "_key"  # assembled so the privacy check does not flag this file
@@ -549,3 +551,71 @@ def test_storage_rejects_unsafe_identifiers(bad):
     from portfolioforge.understanding.store import group_dir
     with pytest.raises(ValueError):
         group_dir(bad, "g_1")
+
+
+# --- national ID and payment card numbers ------------------------------------------------------------
+
+SYNTHETIC_ID = "078-" + "05-" + "1120"  # a long-retired specimen number, assembled at run time
+SYNTHETIC_CARD = "4111 " + "1111 " + "1111 " + "1111"  # the standard test number
+SYNTHETIC_CARD_PLAIN = SYNTHETIC_CARD.replace(" ", "")
+
+
+@pytest.mark.parametrize("text, kind", [
+    (f"ssn = '{SYNTHETIC_ID}'", "national_id"),
+    (f"Example: lookup({SYNTHETIC_ID}) returns a record", "national_id"),
+    (f"card = '{SYNTHETIC_CARD}'", "payment_card"),
+    (f"card = {SYNTHETIC_CARD_PLAIN}", "payment_card"),
+    (f"card = {SYNTHETIC_CARD.replace(' ', '-')}", "payment_card"),
+])
+def test_identity_numbers_are_redacted(text, kind):
+    cleaned, counts = redact(text)
+    assert counts == {kind: 1}
+    assert SYNTHETIC_ID not in cleaned and SYNTHETIC_CARD_PLAIN not in cleaned.replace(" ", "").replace("-", "")
+
+
+@pytest.mark.parametrize("text", [
+    "released = '2001-04-17'",
+    "version = '1.2.3-4'",
+    "part = '1234-56-78901'",
+    "total = 1234567890123",  # long, but fails the card checksum
+    "measured = 4111 1111 1111 1112",
+    "x = 123456789",
+])
+def test_ordinary_numbers_are_kept(text):
+    assert redact(text) == (text, {})
+
+
+def test_scan_and_redaction_use_the_same_patterns():
+    from portfolioforge.understanding import sensitive
+    from portfolioforge.understanding.redact import _CARD, _SSN
+
+    assert sensitive._SSN is _SSN and sensitive._CARD is _CARD
+    text = f"a = '{SYNTHETIC_ID}'\nb = '{SYNTHETIC_CARD}'\n"
+    flagged = {f.kind for f in sensitive.scan_text("demo.py", text)[0]}
+    assert {"national_id", "payment_card"} <= flagged
+    assert not {"national_id", "payment_card"} & {f.kind for f in sensitive.scan_text("demo.py", redact(text)[0])[0]}
+
+
+def test_identity_numbers_never_reach_the_payload(tmp_path, fake_system):
+    """The real path: a docstring example becomes a definition excerpt, then the exact bytes sent."""
+    source = (f'def lookup(number):\n    """Find a record.\n\n    Example: lookup("{SYNTHETIC_ID}")\n'
+              f'    Card: {SYNTHETIC_CARD}\n    """\n    return number\n\n\n'
+              f'def other(a="{SYNTHETIC_ID}"):\n    return a\n')
+    root = make_tree(tmp_path / "Synthetic", {"Work/Billing/lookup.py": source, "Work/Billing/README.md": "# Billing\n",
+                                              "Work/Other/x.py": "print(1)\n"})
+    inventory = scan_inventory(root, system=fake_system)
+    target = next(g for g in propose_groups(inventory).groups if g.working_title.text == "Billing")
+    decisions = [Decision("d", "accept", (target.id,), None, datetime(2026, 1, 1, tzinfo=UTC))]
+    run = propose_groups(inventory, decisions=decisions)
+    group = run.group(target.id)
+    eligibility = {e.group_id: e for e in assess_run(run, inventory)}[group.id]
+    approval = approve_files(inventory_key="inv", group=group, eligibility=eligibility, inventory=inventory,
+                             proposal=propose_selection(group, inventory, PrivacySettings()), acknowledge_review=True)
+    pack = build_evidence_pack(approval, ApprovedFileReader(approval, PrivacySettings()))
+    manifest, payload = build_manifest(pack, "anthropic", "claude-sonnet-5-5")
+    text = payload.decode("utf-8")
+    assert SYNTHETIC_ID not in text and SYNTHETIC_CARD not in text
+    assert "[id number removed]" in text and "[card number removed]" in text
+    assert sum(i.redactions.get("national_id", 0) for i in manifest.items) == 2
+    assert sum(i.redactions.get("payment_card", 0) for i in manifest.items) == 1
+    assert "national_id" in format_manifest(manifest)
