@@ -1,8 +1,37 @@
 # PortfolioForge
 
-PortfolioForge is an agentic AI system that turns a scattered history of software engineering and machine learning work into a clean, published portfolio.
+**An AI engineering application that turns years of scattered projects into a reviewed, documented portfolio on GitHub.**
 
-Past projects, especially academic ones, tend to be scattered: course folders on a laptop, `PycharmProjects`, `Downloads`, a personal Google Drive, and Google Colab notebooks. Often they have no README, no dependency file and no version control, and one course folder may hold several unrelated assignments. PortfolioForge aims to find these files, understand them, document them, and publish them to GitHub.
+Past projects, especially academic ones, tend to be scattered: course folders on a laptop, `PycharmProjects`, `Downloads`, and old notebooks. Often they have no README, no dependency file and no version control, and one course folder may hold several unrelated assignments. PortfolioForge finds this work, works out what it is, documents it from evidence, and publishes it to private GitHub repositories. You then choose which ones to make public.
+
+## How it works
+
+You authorize a clearly scoped batch, and PortfolioForge does the routine work. Anything it can't handle safely is deferred, so the rest keep moving.
+
+```text
+Discover -> Group -> Read approved files -> Inspect locally -> Approve disclosure -> AI analysis -> Verify claims
+   -> Name -> README and provenance -> Privacy and attribution checks -> Stage -> Approve scope -> Publish PRIVATE
+   -> One consolidated report -> You choose what goes public, separately
+```
+
+| Stage | What it does |
+|---|---|
+| **Discovery** | Inventories files from metadata alone, without opening them |
+| **Grouping** | Sorts files into courses, assignments and projects, with confidence scores and duplicate detection |
+| **Local understanding** | Extracts redacted evidence and inspects build systems, entry points and packages through pluggable language inspectors |
+| **AI analysis** | Sends only an approved, hash-bound disclosure, then verifies every AI claim against the evidence it cited |
+| **Documentation** | Generates a project-focused README and a `PROVENANCE.md` recording origin, attribution and what was actually run |
+| **Validation** | Optionally compiles or runs code on temporary copies, after separate approval |
+| **Publication** | Blocks on privacy findings, never overwrites a repository, and checks the commit against the approved bytes |
+
+## Engineering highlights
+
+- **Evidence over assertion.** Unverifiable claims are rejected locally. A README never says something worked unless a recorded run shows it, and then only says what was observed.
+- **Privacy by design.** Nothing leaves the computer without approval of the exact payload, provider and model. Secrets, IDs, paths and personal details are redacted or blocked.
+- **Resumable batch orchestration.** A persistent queue derives each project's state from its records, so interruptions repeat nothing, including paid AI requests.
+- **Safe with untrusted code.** Project code never runs without explicit approval. Build files are parsed, not executed, and Git metadata is read with its dangerous settings disabled.
+- **Extensible.** A small inspector interface adds a project type without changing the core.
+- **Tested.** Hundreds of tests use only invented projects, with fake providers and a fake GitHub CLI.
 
 ## Status
 
@@ -15,10 +44,9 @@ Past projects, especially academic ones, tend to be scattered: course folders on
 | **AI project understanding and naming** (Anthropic, approval-gated, locally verified; [design](docs/design/project-understanding-and-naming.md)) | ✅ Implemented, opt-in; never runs without your approvals |
 | **Local build-and-run inspection** (separately approved; Java is the only project type with an inspector) | ✅ Implemented |
 | **Optional local validation** (compile or run on a temporary copy, each approved separately; not a sandbox) | ✅ Implemented, opt-in; runs nothing without your typed approval |
-| AI analysis of code, notebooks and documents | 🗓️ Planned |
 | **Google Drive and Google Colab discovery** (read-only; contents downloaded only after typed approval) | ✅ Implemented, opt-in |
-| Documentation generation | 🗓️ Planned |
 | **GitHub discovery** (read-only metadata and attribution signals; never fetches contents) | ✅ Implemented, opt-in |
+| **Documentation generation** (project READMEs and `PROVENANCE.md`) | ✅ Implemented |
 | **Publishing to GitHub** (one new repository per project, after checks and typed approval; private by default) | ✅ Implemented, opt-in |
 | **Batch processing** (many projects, one consolidated review; private only) | ✅ Implemented, opt-in |
 
@@ -573,7 +601,7 @@ python -m portfolioforge.batch send <GROUP> <GROUP> ...              # send thes
 python -m portfolioforge.batch accept-names <GROUP> <GROUP>=<SLUG> ...
 python -m portfolioforge.batch validate <GROUP> ... --action compile # or run
 python -m portfolioforge.batch stage <GROUP> ... --ownership mine --license none
-python -m portfolioforge.batch publish <GROUP> ...                   # previews each one, and asks for each one
+python -m portfolioforge.batch publish <GROUP> ...                   # one approval of the listed PRIVATE scope
 python -m portfolioforge.batch status
 python -m portfolioforge.batch resume                                # after an interruption
 ```
@@ -584,7 +612,8 @@ python -m portfolioforge.batch resume                                # after an 
 - **A send that ends unclearly is never repeated by itself.** After an interruption, timeout, connection failure or server error, the request may already have been processed or charged, so the project waits for your `send --resend`. PortfolioForge also turns off the Anthropic SDK's own automatic retries. An answer saved before an interruption is used without a new request.
 - **You can set projects aside at any point** with `exclude` (for unrelated work or a duplicate) or `defer`, and bring them back with `restore`. Nothing is read or sent for them.
 - **Every valid AI name suggestion is shown in the review.** The first is the visible default, and you can choose another.
-- **Publishing is private only, and each repository is previewed and approved individually.** A taken name is never overwritten. One project's problem doesn't stop the others.
+- **Publishing is private only, under one approval of an exact list.** `batch publish` shows every repository in scope, then asks once. Each stage still gets its own recorded approval and full checks. A project that can't be published safely is deferred, a taken name is never overwritten, and the rest continue. You get one report, and making anything public is a separate decision.
+- **Project READMEs are about the project,** covering its purpose, technologies, setup and evidence-supported results, plus any attribution. PortfolioForge appears only in a one-line footnote.
 - **Program output stays out of the batch output,** and stays in a redacted local record.
 - **Sensitive findings use the existing commands:** `python -m portfolioforge.publishing review`, `open-finding` and `resolve`.
 
