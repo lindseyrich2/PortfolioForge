@@ -758,10 +758,9 @@ def test_a_drive_project_reaches_publishing_only_through_every_gate(pipeline, mo
     _, status = pipeline("status")
     assert "needs_publish_approval" in status, status
     from portfolioforge.batch import workflow as bw
-    name = bw.latest_stage(_drive_key(), group).repo_name
     code, out = pipeline("publish", group, answer="no")
     assert not github.created, "declining must not publish"
-    code, out = pipeline("publish", group, answer=f"publish {name}")
+    code, out = pipeline("publish", group, answer="publish 1 private")
     assert code == 0, out
     assert [c.visibility for c in github.created] == ["PRIVATE"]
     staged = {f.path for f in bw.latest_stage(_drive_key(), group).files}
