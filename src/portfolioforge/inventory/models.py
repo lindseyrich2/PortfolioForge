@@ -29,6 +29,7 @@ class ScanMode(StrEnum):
     TARGETED = "targeted"
     FULL_COMPUTER = "full_computer"
     GOOGLE_DRIVE = "google_drive"
+    GITHUB = "github"
 
 
 class RootOrigin(StrEnum):
@@ -39,6 +40,7 @@ class RootOrigin(StrEnum):
     ADDITIONAL_DRIVE = "additional_drive"
     OTHER_PROFILE = "other_profile"
     GOOGLE_DRIVE = "google_drive"
+    GITHUB = "github"
 
 
 class EntryKind(StrEnum):

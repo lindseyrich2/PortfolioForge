@@ -18,6 +18,7 @@ Past projects, especially academic ones, tend to be scattered: course folders on
 | AI analysis of code, notebooks and documents | 🗓️ Planned |
 | **Google Drive and Google Colab discovery** (read-only; contents downloaded only after typed approval) | ✅ Implemented, opt-in |
 | Documentation generation | 🗓️ Planned |
+| **GitHub discovery** (read-only metadata and attribution signals; never fetches contents) | ✅ Implemented, opt-in |
 | **Publishing to GitHub** (one new repository per project, after checks and typed approval; private by default) | ✅ Implemented, opt-in |
 | **Batch processing** (many projects, one consolidated review; private only) | ✅ Implemented, opt-in |
 
@@ -525,6 +526,41 @@ python -m portfolioforge.batch --inventory latest-drive approve-read <GROUP> ...
 - **Publishing from Drive covers the files you approved for reading.** To publish other files of a Drive project, approve them first.
 - **Checksums aren't compared against local files,** since that would mean opening them; duplicates rely on names, paths and sizes.
 
+## GitHub discovery
+
+Colab can open a notebook straight from GitHub without saving it to Drive, so a Drive scan can't see those notebooks, and Colab Recents has no public API to read. This scans the repositories your GitHub login can reach, using your existing GitHub CLI sign-in, and writes a normal inventory. Each repository usually becomes one candidate project in the batch; one holding clearly separate assignments or projects can become several.
+
+```powershell
+python -m portfolioforge.github scan                         # every reachable repository, including private ones; asks first
+python -m portfolioforge.github scan --repo OWNER/NAME       # only these; repeatable
+python -m portfolioforge.github scan --notebooks-only        # only notebooks and the folders that lead to them
+python -m portfolioforge.github scan --read-local-remotes    # also match local clones by their Git remote
+python -m portfolioforge.batch --inventory latest-github review
+```
+
+**It's discovery only.** It reads names, sizes, hashes, ownership, fork status and commit counts. It never fetches or copies a file's contents, because the endpoints that return contents aren't on its read-only list, and its records point to locations nothing can open. So a GitHub project stops at `needs_attribution_review`: it can't be approved for reading, sent to an AI provider, validated or published from here. To analyze one, clone it yourself and run the local scan. A cross-source duplicate concern then links the clone to its repository, but the attribution label doesn't carry over by itself, so check it before giving an ownership statement.
+
+**Attribution labels are signals for your review, never proof.** Commit authorship doesn't show who wrote the code: people commit each other's work, and commits can be under an unlinked email.
+
+| Label | When |
+|---|---|
+| `likely_original` | You own it, it isn't a fork or from a template, has no submodules, and no one else has commits |
+| `shared` | You have commits in someone else's repository or a fork, or others have commits in yours; also anything from a template or with submodules |
+| `third_party` | A fork, or someone else's repository, with no commits under your login |
+| `unknown` | Commit counts weren't available, or the only commits aren't linked to any account |
+
+Labels appear in the batch review without naming any repository or person, along with how many notebooks show no commits under your login (commit history is checked for up to `--max-commit-lookups` notebooks, 200 by default). Details stay in the inventory folder's `github-repos.json`. Contributors' names and emails from unlinked commits aren't kept.
+
+- **The same rules as the other scans.** Sensitive names, credential and private folders, links, environments and build output are skipped; a repository with a private name and PortfolioForge's own source are left out.
+- **Duplicates** are compared against your latest local and Drive inventories (`--compare-with`, `--compare-drive`; `none` skips either), and shown on both sides. Nothing is hidden or removed.
+- **`--read-local-remotes` opens one kind of file:** `.git/config` in folders of the local inventory that have a `.git` folder. It's off by default. Only the owner and name are used, so credentials in a remote URL are never kept.
+- **`latest` still means local.** Use `latest-github` or the inventory's ID.
+
+**Limitations:**
+- **Only repositories your login is affiliated with are listed,** on their default branch. A notebook opened in Colab from an unrelated public repository can't be found without its URL.
+- **File dates are known only for notebooks whose commits were checked,** so grouping has less time evidence here than elsewhere.
+- **Pushing, cloning and changing repositories aren't part of this.** There is no such code in this source.
+
 ## Batch processing
 
 This runs the stages above across all your candidate projects, so decisions are made together instead of project by project. It adds no new way to read, send, run or publish anything: each step goes through the same gates.
@@ -577,7 +613,7 @@ PortfolioForge works with the names and locations of your personal files, so it 
 These are enforced by the code and checked by automated tests:
 
 - **It never opens your files.** No file contents are read, executed, modified, moved or deleted; only directory listings are used. Tests run a full scan with file opening, writing, running programs and network connections all made to fail.
-- **Nothing leaves your computer without your approval.** There's no telemetry, and cloud-only placeholders are never downloaded. The Anthropic request needs file approval, approval of the exact payload for that provider and model, and a typed `send` confirmation. Publishing needs its own approval. The optional Google Drive connection is read-only, runs only when you ask for it, and sends no project content to Google; its results stay on your computer.
+- **Nothing leaves your computer without your approval.** There's no telemetry, and cloud-only placeholders are never downloaded. The Anthropic request needs file approval, approval of the exact payload for that provider and model, and a typed `send` confirmation. Publishing needs its own approval. The optional Google Drive connection and GitHub discovery are read-only, run only when you ask for them, and send no project content anywhere; their results stay on your computer.
 - **Results stay out of Git.** Results are written only to your data folder; PortfolioForge refuses any output folder inside a Git repository, and `.gitignore` also blocks `*.jsonl` and the results folders.
 - **Sensitive names are never recorded.** Credential-looking files are skipped, and their names are redacted from every result.
 - **Private folders are skipped entirely** (see below).
@@ -644,7 +680,7 @@ Tests and documentation must use synthetic, generic data only, such as `C:\Users
 
 ## Roadmap
 
-1. **Discover**: inventory local files and Google Drive, including Colab notebooks *(implemented)*.
+1. **Discover**: inventory local files, Google Drive including Colab notebooks, and GitHub repositories *(implemented)*.
 2. **Group**: work out which files belong together, including files spread across folders.
 3. **Analyze**: work out what each project does, what technologies it uses, and how complete it is.
 4. **Document**: generate a README, summary, setup instructions and highlights for each project.
@@ -698,7 +734,11 @@ PortfolioForge/
 │   │   ├── auth.py, client.py      # two read-only permissions; a client that can only issue GET requests
 │   │   ├── discovery.py            # Drive metadata into a normal inventory, under the local scanner's rules
 │   │   ├── hydrate.py              # downloads approved files to a private cache, after typed approval
-│   │   ├── duplicates.py           # possible duplicates between Drive and local inventories
+│   │   ├── duplicates.py           # possible duplicates between cloud and local inventories
+│   │   └── cli.py
+│   ├── github/                     # read-only GitHub discovery (python -m portfolioforge.github)
+│   │   ├── client.py               # GET-only `gh api` calls to a short list of metadata endpoints
+│   │   ├── discovery.py            # repositories into a normal inventory; attribution signals; local remotes
 │   │   └── cli.py
 │   ├── grouping/                   # metadata-only candidate grouping (python -m portfolioforge.grouping)
 │   │   ├── features.py, index.py   # name features; folder tree from the saved inventory

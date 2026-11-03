@@ -92,35 +92,46 @@ def _same_notebook_names(drive: tuple[FileRecord, ...], local: tuple[FileRecord,
     return pairs
 
 
-def _concerns_path(inventory_key: str) -> Path:
+def _concerns_folder(inventory_key: str) -> Path:
     if not inventory_key or any(sep in inventory_key for sep in ("/", "\\")) or inventory_key in (".", ".."):
         raise ValueError("Invalid inventory id.")
-    return data_dir() / "cross-source" / f"{inventory_key}.json"
+    return data_dir() / "cross-source" / inventory_key
 
 
-def save_matches(drive_key: str, local_key: str, matches: list[CrossSourceMatch]) -> None:
+def save_concerns(inventory_key: str, about: str, concerns: dict[str, list[str]], matches: list[dict] | None = None) -> None:
+    """One file per thing compared, so comparing with one source doesn't erase what another found."""
+    folder = _concerns_folder(inventory_key)
+    ensure_safe_output_dir(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{Path(about).name}.json"
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps({"matches": matches or [], "concerns": concerns}, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def save_matches(drive_key: str, local_key: str, matches: list[CrossSourceMatch], *, cloud_label: str = "Google Drive",
+                 other_label: str = "local") -> None:
     """Saved for both inventories, so each batch mentions the other. Only group IDs, so --redact stays safe."""
     label = {_DUPLICATE: "possible duplicate", _VARIANT: "possible variant"}
     sides: dict[str, dict[str, list[str]]] = {drive_key: defaultdict(list), local_key: defaultdict(list)}
     for m in matches:
         loose = m.local_group.startswith(_LOOSE_FILE)
-        other = f"local file {m.local_group[len(_LOOSE_FILE):]}" if loose else f"local project {m.local_group}"
+        other = f"{other_label} file {m.local_group[len(_LOOSE_FILE):]}" if loose else f"{other_label} project {m.local_group}"
         sides[drive_key][m.drive_group].append(f"{label[m.kind]} of {other}")
         if not loose:
-            sides[local_key][m.local_group].append(f"{label[m.kind]} of Google Drive project {m.drive_group}")
-    for key, concerns in sides.items():
-        path = _concerns_path(key)
-        ensure_safe_output_dir(path.parent)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(path.name + ".tmp")
-        temporary.write_text(json.dumps({"matches": [asdict(m) for m in matches], "concerns": concerns}, indent=2),
-                             encoding="utf-8")
-        temporary.replace(path)
+            sides[local_key][m.local_group].append(f"{label[m.kind]} of {cloud_label} project {m.drive_group}")
+    for key, about in ((drive_key, local_key), (local_key, drive_key)):
+        save_concerns(key, about, sides[key], [asdict(m) for m in matches])
 
 
 def load_concerns(inventory_key: str) -> dict[str, list[str]]:
     """Group ID to concerns. Advisory: an absent or unreadable file just means none are known."""
-    try:
-        return json.loads(_concerns_path(inventory_key).read_text(encoding="utf-8"))["concerns"]
-    except (OSError, ValueError, KeyError, TypeError):
-        return {}
+    merged: dict[str, list[str]] = defaultdict(list)
+    folder = _concerns_folder(inventory_key)
+    for path in sorted(folder.glob("*.json")) if folder.is_dir() else ():
+        try:
+            for group, concerns in json.loads(path.read_text(encoding="utf-8"))["concerns"].items():
+                merged[group].extend(concerns)
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+    return dict(merged)

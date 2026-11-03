@@ -223,7 +223,8 @@ def _review(ctx: bw.Context, queue: bw.Queue, args: argparse.Namespace) -> str:
         if s["flags"]:
             lines.append(f"  Review flags: {s['flags']}")
         for concern in job.concerns:
-            lines.append(f"  Duplicate:   {concern}")
+            label = "Attribution:" if concern.startswith("attribution:") else "Duplicate:"
+            lines.append(f"  {label:<13}{concern}")
         if job.error:
             lines.append(f"  ERROR:       {job.error}  (resume retries this)")
         lines.append("")
@@ -292,7 +293,7 @@ def _approve_read(args: argparse.Namespace, ctx: bw.Context, queue: bw.Queue, in
         print(f"  {len(selection.selected)} source file(s), {len(build.candidates)} build file(s); "
               f"{len(selection.excluded)} excluded")
         for concern in queue.jobs[group_id].concerns:
-            print(f"  Duplicate: {concern}")
+            print(f"  {'Attribution' if concern.startswith('attribution:') else 'Duplicate'}: {concern}")
         to_read += [*(s.file_id for s in selection.selected), *(c.file_id for c in build.candidates)]
     from_drive = hydrate.is_drive_inventory(ctx.inventory)
     print("\n" + (hydrate.READ_NOTICE if from_drive else "These files would be read on this computer only. Nothing is sent, run or changed."))

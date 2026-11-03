@@ -23,7 +23,7 @@ from ..drive.duplicates import load_concerns
 from ..grouping.cli import _propose, resolve_inventory
 from ..grouping.models import FlagKind, GroupingRun, GroupKind
 from ..grouping.store import load_run
-from ..inventory.models import Inventory
+from ..inventory.models import Inventory, ScanMode
 from ..paths import data_dir
 from ..privacy import PrivacySettings, load_privacy_settings
 from ..publishing import cli as pcli
@@ -62,6 +62,8 @@ from ..understanding.validation import ValidationUnavailable, build_plan, valida
 QUEUE_VERSION = 1
 # Waiting for a decision. Every state names what would move it on.
 ACTIONS: dict[str, tuple[str, str]] = {
+    "needs_attribution_review": ("exclude --reason TEXT, or defer", "review who owns this GitHub project. Its files aren't "
+                                                                    "read from here; to analyze it, clone it and scan it locally"),
     "needs_read_approval": ("approve-read", "allow reading this project's files on this computer"),
     "needs_provider": ("run --provider anthropic", "choose an AI provider, so disclosures can be prepared"),
     "needs_disclosure_approval": ("send", "approve sending this exact disclosure to the AI provider"),
@@ -334,6 +336,8 @@ def advance(ctx: Context, queue: Queue, job: Job) -> None:
     eligibility = ctx.eligibility[group.id]
     if eligibility.status in (EligibilityStatus.PERSONAL_OR_ADMIN, EligibilityStatus.EXCLUDED):
         return _set(job, "not_eligible", "; ".join(eligibility.reasons))
+    if ctx.inventory.report.mode is ScanMode.GITHUB:  # discovery only: nothing here can be read, sent or published
+        return _set(job, "needs_attribution_review", eligibility.status.value)
     source = latest_file_approval(ctx.key, group.id)
     if source is None:
         return _set(job, "needs_read_approval", eligibility.status.value)

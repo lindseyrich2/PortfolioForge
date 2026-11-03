@@ -40,6 +40,8 @@ def make_client() -> DriveClient:
 
 def require_download_permission(inventory: Inventory) -> None:
     """Fail before asking for approval, not after. Does nothing for a local inventory."""
+    if inventory.report.mode is ScanMode.GITHUB:
+        raise DriveError("GitHub discovery doesn't read files. To analyze this project, clone it and run the local scan.")
     if is_drive_inventory(inventory):
         make_client()
 

@@ -26,6 +26,8 @@ REPORT_NAME = "report.json"
 PLAN_NAME = "plan.json"
 #: Only in a Google Drive inventory: how to fetch each file once it has been approved.
 DRIVE_FILES_NAME = "drive-files.jsonl"
+#: Only in a GitHub inventory: each repository's ownership, commit counts and attribution label.
+GITHUB_REPOS_NAME = "github-repos.json"
 
 
 class InventorySink(Protocol):
@@ -161,7 +163,8 @@ def load_inventory(directory: str | os.PathLike[str]) -> Inventory:
     )
 
 
-INVENTORY_FILE_NAMES = frozenset({FILES_NAME, DIRECTORIES_NAME, SKIPPED_NAME, REPORT_NAME, PLAN_NAME, DRIVE_FILES_NAME})
+INVENTORY_FILE_NAMES = frozenset({FILES_NAME, DIRECTORIES_NAME, SKIPPED_NAME, REPORT_NAME, PLAN_NAME, DRIVE_FILES_NAME,
+                                  GITHUB_REPOS_NAME})
 
 
 def default_output_dir(now: datetime | None = None) -> Path:
