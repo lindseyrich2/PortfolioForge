@@ -259,7 +259,7 @@ def create_stage(*, inventory_key: str, group: CandidateGroup, eligibility: Elig
             contents[candidate.project_path] = reader.read_bytes(candidate.file_id)
         except ReadRefused as exc:
             raise PublishRefused(f"A selected file could not be read: {exc}") from None
-    contents["README.md"] = proposal.readme_markdown(draft=False).encode("utf-8")
+    contents["README.md"] = proposal.readme_markdown(draft=False, attribution=attribution).encode("utf-8")
     contents["PROVENANCE.md"] = provenance_markdown(
         proposal, chosen, visibility, ownership, coursework, license_id, attribution).encode("utf-8")
 
