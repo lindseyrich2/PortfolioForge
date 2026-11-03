@@ -473,7 +473,7 @@ def test_a_project_prepared_earlier_can_be_set_aside_and_its_disclosure_cannot_b
 def test_setting_aside_a_published_project_does_not_hide_that_it_was_published(batch):
     groups = _staged(batch, "SortLab")
     name = bw.latest_stage(KEY, groups[0]).repo_name
-    assert batch.run("publish", *groups, answer=f"publish {name}")[0] == 0
+    assert batch.run("publish", *groups, answer="publish 1 private")[0] == 0
     batch.run("exclude", *groups, "--reason", "done")
     assert batch.run("resume")[0] == 0
     assert batch.job("SortLab").state == "published"
@@ -626,35 +626,101 @@ def test_accepting_findings_in_the_existing_command_moves_the_project_on(batch):
 # --- publishing ------------------------------------------------------------------------------------------------
 
 
-def test_each_repository_is_approved_individually_then_published_together(batch):
+def test_one_approval_publishes_the_listed_scope_privately(batch):
     groups = _staged(batch, "SortLab", "StatsLab")
-    names = {g: bw.latest_stage(KEY, g).repo_name for g in groups}
-    code, out, _ = batch.run("publish", *groups, answers=["no", f"publish {names[groups[1]]}"])
-    assert code == 0 and "Published 1 of 2" in out and "Visibility:  PRIVATE" in out
-    assert out.count("----- README.md -----") == 2  # each one is previewed in full
-    assert len(batch.github.created) == 1
-    created = batch.github.created[0]
-    assert "--private" in created.argv and "--public" not in created.argv and names[groups[1]] in created.name
+    names = {bw.latest_stage(KEY, g).repo_name for g in groups}
+    code, out, _ = batch.run("publish", *groups, answer="publish 2 private")  # one answer, for both
+    assert code == 0 and "Scope of this approval: 2 new PRIVATE repositories" in out and "Published 2 of 2" in out
+    assert all(name in out for name in names) and "separate decision" in out
+    assert {c.name.split("/")[1] for c in batch.github.created} == names
+    assert all("--private" in c.argv and "--public" not in c.argv for c in batch.github.created)
     states = bw.load_queue(KEY).jobs
-    assert states[groups[1]].state == "published" and states[groups[0]].state == "needs_publish_approval"
+    assert all(states[g].state == "published" for g in groups)
+    for group in groups:  # every stage keeps its own recorded approval and audit trail
+        assert len(list(group_dir(KEY, group).glob("publish-approval-*.json"))) == 1
+        audit = (group_dir(KEY, group) / "audit.jsonl").read_text(encoding="utf-8")
+        assert '"outcome": "publish_approved"' in audit and '"outcome": "published"' in audit
 
 
-def test_publishing_needs_a_person_for_each_one(batch):
+def test_the_scope_is_shown_and_nothing_is_published_without_the_exact_phrase(batch):
+    groups = _staged(batch, "SortLab", "StatsLab")
+    for answer in ("yes", "approve", "publish 1 private", "publish 2", "publish 2 public", ""):
+        code, out, _ = batch.run("publish", *groups, answer=answer)
+        assert code == 1 and "Nothing was published" in out and "Scope of this approval" in out
+    assert batch.github.created == [] and not list(group_dir(KEY, groups[0]).glob("publish-approval-*"))
+
+
+def test_publishing_needs_a_person(batch):
     groups = _staged(batch, "SortLab")
 
     def nobody(prompt):
         raise EOFError
 
-    assert bcli.main(["publish", *groups], input_fn=nobody) == 0
+    assert bcli.main(["publish", *groups], input_fn=nobody) == 1
     assert batch.github.created == [] and batch.job("SortLab").state == "needs_publish_approval"
+
+
+def test_a_failure_defers_only_that_project(batch, monkeypatch):
+    groups = _staged(batch, "SortLab", "StatsLab")
+    real = pcli._publish
+
+    def fails_first(args, key, group, stage, terms, inspector):
+        if group.id == groups[0]:
+            raise pw.PublishRefused("the push failed")
+        return real(args, key, group, stage, terms, inspector)
+
+    monkeypatch.setattr(pcli, "_publish", fails_first)
+    code, out, err = batch.run("publish", *groups, answer="publish 2 private")
+    assert code == 1 and "Published 1 of 2" in out and "Failed: 1" in out and "the push failed" in err
+    assert len(batch.github.created) == 1
+
+
+def test_a_finding_that_appears_after_staging_defers_that_project_and_the_rest_continue(batch):
+    groups = _staged(batch, "SortLab", "StatsLab")
+    root = pw.stage_dir(KEY, groups[0], bw.latest_stage(KEY, groups[0]).id)
+    real = pw.run_checks
+    first = bw.latest_stage(KEY, groups[0]).id
+
+    def flagged(stage, **kwargs):
+        found = real(stage, **kwargs)
+        return [*found, pw.Finding("x", "privacy", "new", "high", None, None, "new")] if stage.id == first else found
+
+    pw.run_checks, restore = flagged, real
+    try:
+        code, out, _ = batch.run("publish", *groups, answer="publish 1 private")
+    finally:
+        pw.run_checks = restore
+    assert code == 0 and f"deferred: {groups[0]}" in out and len(batch.github.created) == 1
+    assert root.is_dir()
+
+
+def test_the_published_readme_is_about_the_project(batch):
+    groups = _staged(batch, "ShelfTracker", "SortLab")
+    for group in groups:
+        stage = bw.latest_stage(KEY, group)
+        readme = (pw.stage_dir(KEY, group, stage.id) / "README.md").read_text(encoding="utf-8")
+        footnote = "_Documentation prepared with assistance from [PortfolioForge](https://github.com/lindseyrich2/PortfolioForge)._"
+        assert readme.rstrip().endswith(footnote) and "PortfolioForge" not in readme.replace(footnote, "")
+        assert "Draft generated" not in readme and "have **not** been run or tested" in readme
+
+
+def test_attribution_is_in_the_readme_and_does_not_cause_endless_refreshes(batch):
+    groups = _named(batch, "SortLab")
+    text = "Includes code credited to an invented vendor."
+    assert batch.run("stage", *groups, "--ownership", "includes-third-party", "--license", "none", "--attribution", text, answer="stage 1")[0] == 0
+    stage = bw.latest_stage(KEY, groups[0])
+    readme = (pw.stage_dir(KEY, groups[0], stage.id) / "README.md").read_text(encoding="utf-8")
+    assert "## Attribution" in readme and text in readme
+    assert batch.run("resume")[0] == 0
+    assert bw.latest_stage(KEY, groups[0]).id == stage.id
 
 
 def test_a_taken_name_is_never_overwritten_and_others_still_publish(batch):
     groups = _staged(batch, "SortLab", "StatsLab")
     names = {g: bw.latest_stage(KEY, g).repo_name for g in groups}
     batch.github.existing.add(names[groups[0]])
-    code, out, _ = batch.run("publish", *groups, answers=[f"publish {names[groups[1]]}"])
-    assert code == 0 and "ALREADY EXISTS" in out and "can't be approved" in out
+    code, out, _ = batch.run("publish", *groups, answer="publish 1 private")
+    assert code == 0 and "already exists, and is never overwritten" in out
     assert [c.name.split("/")[1] for c in batch.github.created] == [names[groups[1]]]
 
 
@@ -681,20 +747,20 @@ def test_a_real_public_stage_is_refused_by_a_batch(batch):
                     file_ids=[c.file_id for c in chosen], visibility="public", ownership="mine", license_id="none")
     assert batch.run("resume")[0] == 0
     assert batch.job("SortLab").state == "needs_publish_approval"
-    code, out, _ = batch.run("publish", *groups, answer="publish public invented-sorter-tool")
+    code, out, _ = batch.run("publish", *groups, answer="publish 1 private")
     assert "A batch only publishes private repositories" in out and batch.github.created == []
 
 
 def test_published_projects_are_recognized_and_left_alone(batch):
     groups = _staged(batch, "SortLab")
     name = bw.latest_stage(KEY, groups[0]).repo_name
-    assert batch.run("publish", *groups, answer=f"publish {name}")[0] == 0
+    assert batch.run("publish", *groups, answer="publish 1 private")[0] == 0
     records = sorted(p.name for p in group_dir(KEY, groups[0]).iterdir())
     for _ in range(2):
         assert batch.run("run", "--provider", "anthropic")[0] == 0
     assert batch.job("SortLab").state == "published"
     assert sorted(p.name for p in group_dir(KEY, groups[0]).iterdir()) == records  # no new stage, plan or proposal
-    code, _, err = batch.run("publish", *groups, answer=f"publish {name}")
+    code, _, err = batch.run("publish", *groups, answer="publish 1 private")
     assert code == 1 and "Not at this step" in err and len(batch.github.created) == 1
 
 
@@ -714,7 +780,7 @@ def _data_files():
 def test_repeating_run_and_resume_changes_no_existing_record(batch):
     groups = _staged(batch, "SortLab", "StatsLab")
     name = bw.latest_stage(KEY, groups[0]).repo_name
-    assert batch.run("publish", groups[0], answer=f"publish {name}")[0] == 0
+    assert batch.run("publish", groups[0], answer="publish 1 private")[0] == 0
     before = _data_files()
     for command in (("run", "--provider", "anthropic"), ("resume",), ("status",), ("review",)):
         assert batch.run(*command)[0] == 0
@@ -746,7 +812,7 @@ def test_the_only_repository_operation_is_creating_a_new_one(batch):
     groups = _staged(batch, "SortLab")
     name = bw.latest_stage(KEY, groups[0]).repo_name
     batch.github.existing.add(name)  # the fake fails on any GitHub call it doesn't expect
-    assert batch.run("publish", *groups, answer=f"publish {name}")[0] == 0
+    assert batch.run("publish", *groups, answer="publish 1 private")[0] == 0
     assert batch.github.created == []
 
 

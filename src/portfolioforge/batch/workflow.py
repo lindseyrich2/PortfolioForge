@@ -306,7 +306,7 @@ def _stage_step(ctx: Context, job: Job, group, proposal):
         pw.verify_tree(stage)
     except pw.PublishRefused:
         return None  # made under older rules, or changed: it needs staging again
-    readme = hashlib.sha256(proposal.readme_markdown(draft=False).encode("utf-8")).hexdigest()
+    readme = hashlib.sha256(proposal.readme_markdown(draft=False, attribution=stage.attribution).encode("utf-8")).hexdigest()
     staged = next(f.sha256 for f in stage.files if f.path == "README.md")
     if readme != staged:  # new results: same files, same acceptances, new documents
         eligibility = ctx.eligibility[group.id]

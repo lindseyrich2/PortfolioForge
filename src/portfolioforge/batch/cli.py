@@ -12,7 +12,7 @@ Your decisions. Each one lists exactly what it covers, then asks you to type a c
     accept-names GROUP[=SLUG] ...                        choose repository names; the first valid suggestion is the default
     validate GROUP ... --action {compile,run,test}       run these checks on temporary copies
     stage GROUP ... --ownership O --license L [--coursework] [--attribution TEXT]
-    publish GROUP ...                                    create these PRIVATE repositories; asks for each
+    publish GROUP ...                                    create these PRIVATE repositories under one approval of the listed scope
 
 Set projects aside at any time, without reading their files or sending anything:
     exclude GROUP ... --reason TEXT                      leave out, such as unrelated work or a duplicate
@@ -106,7 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
     stage.add_argument("--license", required=True, metavar="SPDX|none")
     stage.add_argument("--coursework", action="store_true", help="record in PROVENANCE.md that these began as coursework")
     stage.add_argument("--attribution", help="credit for other people's code; goes in PROVENANCE.md")
-    publish = sub.add_parser("publish", help="create these PRIVATE repositories; asks for each one")
+    publish = sub.add_parser("publish", help="create these PRIVATE repositories under one approval of the listed scope")
     publish.add_argument("groups", nargs="+")
     exclude = sub.add_parser("exclude", help="leave out, without reading or sending anything")
     exclude.add_argument("groups", nargs="+")
@@ -492,38 +492,57 @@ def _stage(args: argparse.Namespace, ctx: bw.Context, queue: bw.Queue, input_fn:
 
 
 def _publish(args: argparse.Namespace, ctx: bw.Context, queue: bw.Queue, input_fn: Input) -> int:
-    """Each repository gets its own preview and typed approval, then the approved ones are published together."""
+    """One approval of an exact list. Anything unsafe is deferred, and the rest continue.
+
+    The approval covers each stage's exact files, name and visibility, and is recorded for each stage,
+    so every repository still goes through the same checks. A batch never creates a public repository.
+    """
     _in_state(queue, args.groups, "needs_publish_approval")
     run = pcli.make_runner
     owner = pw.github_account(run)
-    approved = []
+    eligible, deferred = [], []
     for group_id in args.groups:
         stage = bw.latest_stage(ctx.key, group_id)
-        if stage.visibility != pw.PRIVATE:
-            print(f"{group_id}: skipped. A batch only publishes private repositories.")
-            continue
         group = ctx.run.group(group_id)
         inspector = bw.inspector_for(ctx, group)
-        email = pw.committer_email(stage, run)
-        findings = pw.run_checks(stage, identity_terms=ctx.terms, inspector=inspector, committer_email=email)
-        free = pw.name_is_free(owner, stage.repo_name, run)
-        print(pw.format_preview(stage, findings, owner=owner, name_free=free, committer=email))
-        if not free or pw.blockers(findings):
-            print(f"\n{group_id}: can't be approved: the name is taken or a finding is unresolved.")
-            continue
-        if _ask(input_fn, f"publish {stage.repo_name}"):
-            pw.save_approval(pw.approve(stage, findings, owner, free), ctx.key, group_id)
-            append_audit(ctx.key, group_id, {"stage_id": stage.id, "visibility": stage.visibility,
-                                             "outcome": "publish_approved"})
-            approved.append((group_id, group, stage, inspector))
+        findings = pw.run_checks(stage, identity_terms=ctx.terms, inspector=inspector,
+                                 committer_email=pw.committer_email(stage, run))
+        if stage.visibility != pw.PRIVATE:
+            deferred.append((group_id, "A batch only publishes private repositories."))
+        elif pw.blockers(findings):
+            deferred.append((group_id, "an unresolved high-risk finding"))
+        elif not pw.name_is_free(owner, stage.repo_name, run):
+            deferred.append((group_id, "a repository with that name already exists, and is never overwritten"))
         else:
-            print(f"{group_id}: not approved.")
-    failed = 0
-    for group_id, group, stage, inspector in approved:  # one failure never stops the others
+            eligible.append((group_id, group, stage, inspector, findings))
+    print(f"Scope of this approval: {len(eligible)} new PRIVATE repositories under {owner}. Nothing is made public.")
+    for group_id, _, stage, _, findings in eligible:
+        originals = sum(not f.generated for f in stage.files)
+        accepted = sum(f.resolved is not None for f in findings)
+        print(f"  {'[hidden]' if args.redact else stage.repo_name}  private, {originals} original file(s), {accepted} accepted "
+              f"finding(s), ownership {stage.ownership}, stage {stage.id}")
+    for group_id, reason in deferred:
+        print(f"  deferred: {group_id}: {reason}")
+    if not eligible:
+        print("Nothing is eligible to publish.")
+        return EXIT_OK
+    word = f"publish {len(eligible)} private"
+    if not _ask(input_fn, word):
+        print("Not approved. Nothing was published.")
+        return EXIT_ERROR
+    append_audit(ctx.key, eligible[0][0], {"outcome": "private_scope_approved", "visibility": pw.PRIVATE,
+                                           "stages": [[s.id, s.digest] for _, _, s, _, _ in eligible]})
+    published, failed = [], []
+    for group_id, group, stage, inspector, findings in eligible:  # one failure never stops the others
         try:
-            pcli._publish(Namespace(redact=False), ctx.key, group, stage, ctx.terms, inspector)
+            pw.save_approval(pw.approve(stage, findings, owner, True), ctx.key, group_id)
+            append_audit(ctx.key, group_id, {"stage_id": stage.id, "visibility": stage.visibility,
+                                             "outcome": "publish_approved", "scope": "batch"})
+            pcli._publish(Namespace(redact=args.redact), ctx.key, group, stage, ctx.terms, inspector)
+            published.append(group_id)
         except pw.PublishRefused as exc:
             print(f"error: {group_id}: {exc}", file=sys.stderr)
-            failed += 1
-    print(f"\nPublished {len(approved) - failed} of {len(args.groups)} private repositories.")
+            failed.append(group_id)
+    print(f"\nPublished {len(published)} of {len(args.groups)} private repositories. Deferred: {len(deferred)}. "
+          f"Failed: {len(failed)}. Making any of them public is a separate decision.")
     return EXIT_ERROR if failed else EXIT_OK
