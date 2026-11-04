@@ -163,10 +163,6 @@ def load_inventory(directory: str | os.PathLike[str]) -> Inventory:
     )
 
 
-INVENTORY_FILE_NAMES = frozenset({FILES_NAME, DIRECTORIES_NAME, SKIPPED_NAME, REPORT_NAME, PLAN_NAME, DRIVE_FILES_NAME,
-                                  GITHUB_REPOS_NAME})
-
-
 def default_output_dir(now: datetime | None = None) -> Path:
     """``<data dir>/inventories/<UTC timestamp>`` (see :mod:`portfolioforge.paths`)."""
     stamp = (now or datetime.now(UTC)).strftime("%Y%m%dT%H%M%SZ")

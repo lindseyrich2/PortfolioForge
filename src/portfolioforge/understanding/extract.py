@@ -332,6 +332,3 @@ def evidence_summary(pack: EvidencePack) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
-def iter_items(pack: EvidencePack, kinds: Iterable[str] | None = None):
-    wanted = set(kinds) if kinds else None
-    return (i for i in pack.items if wanted is None or i.kind in wanted)

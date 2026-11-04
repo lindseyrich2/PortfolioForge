@@ -17,7 +17,6 @@ from typing import Iterator, Mapping
 # Windows file attribute flags (as reported in os.stat_result.st_file_attributes).
 FILE_ATTRIBUTE_HIDDEN = 0x2
 FILE_ATTRIBUTE_SYSTEM = 0x4
-FILE_ATTRIBUTE_REPARSE_POINT = 0x400
 FILE_ATTRIBUTE_OFFLINE = 0x1000
 FILE_ATTRIBUTE_RECALL_ON_OPEN = 0x40000
 FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x400000

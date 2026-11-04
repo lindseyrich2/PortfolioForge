@@ -21,9 +21,7 @@ from ..drive.discovery import DriveOptions, build_inventory_records, make_plan
 from ..drive.duplicates import find_matches, save_concerns, save_matches
 from ..grouping.cli import UsageError, _propose, resolve_inventory
 from ..grouping.config import load_grouping_config
-from ..inventory import config as cfg
 from ..inventory.cli import format_error, format_report
-from ..inventory.config import ResourceLimits
 from ..inventory.models import ScanMode
 from ..inventory.sinks import JsonlSink
 from ..paths import inventories_dir
@@ -49,9 +47,6 @@ def build_parser() -> argparse.ArgumentParser:
     scan = sub.add_parser("scan", help="write an inventory of your repositories' metadata")
     scan.add_argument("--repo", action="append", default=[], metavar="OWNER/NAME", help="only this repository (repeatable)")
     scan.add_argument("--notebooks-only", action="store_true", help="only notebooks, and the folders that lead to them")
-    scan.add_argument("--include-images", action="store_true", help="also inventory image files")
-    scan.add_argument("--keep-build-dirs", action="store_true", help="do not skip build/out/dist folders")
-    scan.add_argument("--exclude", action="append", default=[], metavar="NAME", help="skip repositories and folders with this name")
     scan.add_argument("--max-commit-lookups", type=int, default=200, metavar="N",
                       help="check commit history for at most N notebooks (default: 200)")
     scan.add_argument("--compare-with", default="latest", metavar="INVENTORY|none", help="local inventory to check for duplicates")
@@ -60,7 +55,6 @@ def build_parser() -> argparse.ArgumentParser:
                       help="also read .git/config in the local inventory's clones, to match them by remote; reads nothing else")
     scan.add_argument("--yes", action="store_true", help="skip the confirmation for scanning every reachable repository")
     scan.add_argument("--redact", action="store_true", help="show no names or paths")
-    scan.add_argument("--privacy-config", metavar="FILE", help="privacy settings file")
     return parser
 
 
@@ -105,13 +99,8 @@ def _scan(args: argparse.Namespace, input_fn: Input) -> int:
             print("Scan cancelled. Nothing was scanned.")
             return EXIT_ERROR
 
-    options = DriveOptions(
-        colab_only=args.notebooks_only, include_shared=True, include_images=args.include_images, skip_build_dirs=not args.keep_build_dirs,
-        exclude_names=frozenset(n.casefold() for n in args.exclude),
-        private_names=load_privacy_settings(args.privacy_config).private_folder_names,
-        limits=ResourceLimits(max_files=cfg.DEFAULT_MAX_FILES, max_depth=cfg.DEFAULT_MAX_DEPTH,
-                              time_budget_seconds=cfg.DEFAULT_TIME_BUDGET_SECONDS),
-    )
+    options = DriveOptions(colab_only=args.notebooks_only, include_shared=True,
+                           private_names=load_privacy_settings().private_folder_names)
     found = discovery.collect(client, login, repositories, options, max_commit_lookups=args.max_commit_lookups)
     started = datetime.now(UTC)
     key = "github-" + started.strftime("%Y%m%dT%H%M%SZ")
