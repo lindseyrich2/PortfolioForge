@@ -26,9 +26,7 @@ from ..grouping.engine import propose_groups
 from ..grouping.models import GroupingRun
 from ..grouping.review import decisions_path, load_decisions
 from ..grouping.store import load_run
-from ..inventory import config as cfg
 from ..inventory.cli import format_error, format_report
-from ..inventory.config import ResourceLimits
 from ..inventory.models import Inventory
 from ..inventory.sinks import JsonlSink
 from ..paths import inventories_dir
@@ -63,19 +61,11 @@ def build_parser() -> argparse.ArgumentParser:
                       help="a top-level folder's exact name, or any folder's ID (repeatable); default: all of My Drive")
     scan.add_argument("--colab-only", action="store_true", help="only notebooks, and the folders that lead to them")
     scan.add_argument("--include-shared", action="store_true", help="also include items you don't own")
-    scan.add_argument("--include-images", action="store_true", help="also inventory image files")
-    scan.add_argument("--keep-build-dirs", action="store_true", help="do not skip build/out/dist folders")
-    scan.add_argument("--exclude", action="append", default=[], metavar="NAME", help="skip folders with this name (repeatable)")
-    scan.add_argument("--max-files", type=int, default=cfg.DEFAULT_MAX_FILES, help="0 disables")
-    scan.add_argument("--max-depth", type=int, default=cfg.DEFAULT_MAX_DEPTH, help="0 disables")
-    scan.add_argument("--time-limit", type=float, default=cfg.DEFAULT_TIME_BUDGET_SECONDS / 60, metavar="MINUTES",
-                      help="0 disables")
     scan.add_argument("--plan-only", action="store_true", help="show what would be scanned, and stop")
     scan.add_argument("--yes", action="store_true", help="skip the confirmation for scanning all of My Drive")
     scan.add_argument("--compare-with", default="latest", metavar="INVENTORY|none",
                       help="local inventory to check for duplicates (default: latest)")
     scan.add_argument("--redact", action="store_true", help="show no names or paths")
-    scan.add_argument("--privacy-config", metavar="FILE", help="privacy settings file")
     again = sub.add_parser("duplicates", help="compare a Drive inventory with a local one again")
     again.add_argument("--inventory", default="latest-drive")
     again.add_argument("--compare-with", default="latest", metavar="INVENTORY")
@@ -130,11 +120,7 @@ def _connect(args: argparse.Namespace) -> int:
 def _options(args: argparse.Namespace) -> discovery.DriveOptions:
     return discovery.DriveOptions(
         folders=tuple(args.folder), colab_only=args.colab_only, include_shared=args.include_shared,
-        include_images=args.include_images, skip_build_dirs=not args.keep_build_dirs,
-        exclude_names=frozenset(n.casefold() for n in args.exclude),
-        private_names=load_privacy_settings(args.privacy_config).private_folder_names,
-        limits=ResourceLimits(max_files=args.max_files or None, max_depth=args.max_depth or None,
-                              time_budget_seconds=(args.time_limit * 60) or None),
+        private_names=load_privacy_settings().private_folder_names,
     )
 
 

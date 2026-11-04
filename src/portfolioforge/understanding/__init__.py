@@ -25,7 +25,6 @@ Pipeline, with two explicit approval gates:
 8. :func:`build_plan` / :func:`approve_plan` / :func:`execute_plan` - optional validation.
    The only code that runs a project: each plan needs its own single-use approval.
 
-See docs/design/project-understanding-and-naming.md.
 """
 
 from .analysis import (

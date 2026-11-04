@@ -67,10 +67,6 @@ class PrivacySettings:
     private_folder_names: frozenset[str] = DEFAULT_PRIVATE_FOLDER_NAMES
     """Casefolded folder names skipped wherever they appear."""
 
-    def is_private_name(self, name: str) -> bool:
-        return name.casefold() in self.private_folder_names
-
-
 def default_privacy_file() -> Path:
     return config_dir() / PRIVACY_FILE_NAME
 

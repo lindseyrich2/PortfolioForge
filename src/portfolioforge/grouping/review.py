@@ -237,7 +237,3 @@ def apply_relationship_decisions(relationships: list[Relationship], groups: Iter
     return sorted(by_id.values(), key=lambda r: r.id), applied, stale
 
 
-def remove_decision_file(path: Path) -> None:
-    """Delete a ledger (used by tests and future data management)."""
-    if path.is_file():
-        os.remove(path)
